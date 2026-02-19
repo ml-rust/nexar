@@ -41,7 +41,7 @@ pub fn decode_message(buf: &[u8]) -> Result<(Header, NexarMessage)> {
 
     let header_bytes: &[u8; HEADER_SIZE] = buf[..HEADER_SIZE]
         .try_into()
-        .expect("slice length checked above");
+        .map_err(|_| NexarError::DecodeFailed("header slice length mismatch".into()))?;
 
     let header = Header::decode(header_bytes)
         .ok_or_else(|| NexarError::DecodeFailed("invalid header: unknown message type".into()))?;
