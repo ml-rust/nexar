@@ -7,6 +7,7 @@ use crate::types::{DataType, ReduceOp};
 pub struct CpuAdapter;
 
 impl CpuAdapter {
+    /// Create a new CPU device adapter for host memory operations.
     pub fn new() -> Self {
         Self
     }

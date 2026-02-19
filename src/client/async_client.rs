@@ -48,10 +48,9 @@ pub struct NexarClient {
     /// Background tasks; kept alive for the lifetime of this client.
     _router_handles: Vec<tokio::task::JoinHandle<Result<()>>>,
     adapter: Arc<dyn DeviceAdapter>,
-    /// Shared buffer pool for router read buffers. Kept alive here so routers
-    /// (which hold `Arc<BufferPool>` clones) share the same pool.
-    #[allow(dead_code)]
-    pool: Arc<BufferPool>,
+    /// Shared buffer pool for router read buffers. Never read directly — kept
+    /// alive so routers (which hold `Arc<BufferPool>` clones) share the same pool.
+    _pool: Arc<BufferPool>,
     barrier_epoch: AtomicU64,
     rpc_registry: Arc<RwLock<RpcRegistry>>,
     rpc_req_id: AtomicU64,
@@ -89,7 +88,7 @@ impl NexarClient {
             routers,
             _router_handles: handles,
             adapter,
-            pool,
+            _pool: pool,
             barrier_epoch: AtomicU64::new(0),
             rpc_registry: Arc::new(RwLock::new(RpcRegistry::new())),
             rpc_req_id: AtomicU64::new(0),
@@ -212,14 +211,17 @@ impl NexarClient {
         router.recv_data(src).await
     }
 
+    /// This client's rank within its communicator group (0-indexed).
     pub fn rank(&self) -> Rank {
         self.rank
     }
 
+    /// Total number of ranks in the communicator group.
     pub fn world_size(&self) -> u32 {
         self.world_size
     }
 
+    /// Reference to the device adapter used for memory staging.
     pub fn adapter(&self) -> &dyn DeviceAdapter {
         self.adapter.as_ref()
     }

@@ -47,10 +47,12 @@ impl SyncClient {
         Ok(Self { inner, rt })
     }
 
+    /// This client's rank within its communicator group (0-indexed).
     pub fn rank(&self) -> Rank {
         self.inner.rank()
     }
 
+    /// Total number of ranks in the communicator group.
     pub fn world_size(&self) -> u32 {
         self.inner.world_size()
     }
