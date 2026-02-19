@@ -1,6 +1,8 @@
 pub(crate) mod buffer_pool;
 mod connection;
 mod listener;
+#[cfg(feature = "rdma")]
+pub mod rdma;
 pub mod router;
 pub(crate) mod tls;
 

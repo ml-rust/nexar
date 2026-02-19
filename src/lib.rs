@@ -12,6 +12,8 @@ pub mod types;
 
 pub use client::{NexarClient, SyncClient};
 pub use cluster::{SeedNode, WorkerNode};
+#[cfg(feature = "cuda")]
+pub use device::CudaAdapter;
 pub use device::{CpuAdapter, DeviceAdapter};
 pub use error::{NexarError, Result};
 pub use memory::GlobalPtr;

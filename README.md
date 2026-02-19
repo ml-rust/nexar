@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/nexar.svg)](https://crates.io/crates/nexar) [![docs.rs](https://docs.rs/nexar/badge.svg)](https://docs.rs/nexar) [![CI](https://github.com/ml-rust/nexar/actions/workflows/ci.yml/badge.svg)](https://github.com/ml-rust/nexar/actions) [![License](https://img.shields.io/crates/l/nexar.svg)](LICENSE)
 
-Distributed runtime for Rust. QUIC transport, stream-multiplexed messaging, built-in collectives. No C dependencies.
+Distributed runtime for Rust. QUIC transport, stream-multiplexed messaging, built-in collectives. Optional RDMA and GPUDirect for hardware-accelerated clusters.
 
 nexar replaces MPI for inter-node communication. It handles the network layer — point-to-point transfers, allreduce, broadcast, barrier — so your distributed application doesn't have to shell out to `mpirun` or link against libfabric.
 
@@ -14,7 +14,8 @@ nexar takes a different approach:
 
 - **QUIC transport** (via quinn). Multiplexed streams mean a stalled tensor transfer doesn't block your barrier. TLS is built into the protocol.
 - **No process launcher.** A lightweight seed node handles discovery. Workers connect, get a rank, and form a direct peer-to-peer mesh. Nodes can join and leave.
-- **No C dependencies.** Pure Rust, compiles with `cargo build`. No `libmpi`, no `libfabric`, no `libucp`.
+- **Zero-config by default.** Pure Rust QUIC transport works everywhere with `cargo build`. No `mpirun`, no `libfabric`, no `libucp`.
+- **Hardware acceleration when available.** Optional RDMA (`--features rdma`) for InfiniBand/RoCE kernel bypass. Optional GPUDirect (`--features gpudirect`) for GPU memory → NIC direct transfer. Same pattern as CUDA in the rest of the ml-rust stack.
 - **Async-native.** Built on tokio. Send and receive overlap naturally.
 
 ## What it provides
@@ -29,7 +30,7 @@ nexar takes a different approach:
 - `tree_broadcast` — fan-out from root
 - `ring_allgather` — ring-based gather
 - `ring_reduce_scatter` — ring-based reduce-scatter
-- `two_phase_barrier` — distributed synchronization with timeout
+- `barrier` — distributed synchronization (two-phase for small clusters, dissemination for larger)
 
 **RPC:**
 
@@ -37,7 +38,7 @@ nexar takes a different approach:
 
 **Device abstraction:**
 
-- `DeviceAdapter` trait lets GPU backends stage memory for network I/O without nexar knowing anything about CUDA or ROCm. A `CpuAdapter` is included.
+- `DeviceAdapter` trait lets GPU backends stage memory for network I/O without nexar knowing anything about CUDA or ROCm. `CpuAdapter` is included; `CudaAdapter` is available with `--features cuda`.
 
 ## Quick start
 
@@ -148,18 +149,29 @@ Messages are serialized with rkyv (zero-copy deserialization). Maximum message s
 **Don't use nexar when:**
 
 - Your GPUs are on the same machine — use NCCL directly (NVLink is 10-100x faster than any network)
-- You need RDMA / GPUDirect — nexar uses standard UDP/QUIC
 - You're already happy with MPI
 
 ## Building
 
 ```bash
-cargo build --release
+cargo build --release                       # Pure Rust QUIC (works everywhere)
+cargo build --release --features cuda       # + CUDA device staging (requires CUDA runtime)
+cargo build --release --features rdma       # + RDMA (requires libibverbs / rdma-core)
+cargo build --release --features gpudirect  # + GPUDirect RDMA (requires libibverbs + CUDA)
 cargo test
 cargo clippy --all-targets
 ```
 
 Requires Rust 1.85+.
+
+## Feature flags
+
+| Feature     | What it enables                                          | C dependency                |
+| ----------- | -------------------------------------------------------- | --------------------------- |
+| _(default)_ | QUIC transport via quinn                                 | None                        |
+| `cuda`      | `CudaAdapter` for GPU↔host memory staging                | CUDA runtime                |
+| `rdma`      | InfiniBand/RoCE kernel bypass via ibverbs                | `libibverbs` (rdma-core)    |
+| `gpudirect` | GPU memory → RDMA NIC directly (enables `rdma` + `cuda`) | `libibverbs` + CUDA runtime |
 
 ## License
 

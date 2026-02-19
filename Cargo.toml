@@ -23,6 +23,19 @@ thiserror = "2.0"
 tracing = "0.1"
 rcgen = "0.14"
 crossbeam-queue = "0.3"
+futures = "0.3"
+
+# Optional: hardware-accelerated transports
+ibverbs = { version = "0.9", optional = true }
+cudarc = { version = "0.19", optional = true, default-features = false, features = [
+  "driver", "dynamic-loading", "std", "cuda-version-from-build-system", "fallback-latest",
+] }
+
+[features]
+default = []
+rdma = ["dep:ibverbs"]
+cuda = ["dep:cudarc"]
+gpudirect = ["rdma", "cuda"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
