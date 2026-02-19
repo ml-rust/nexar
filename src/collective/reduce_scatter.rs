@@ -1,4 +1,5 @@
 use crate::client::NexarClient;
+use crate::collective::{collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::types::{DataType, ReduceOp};
 
@@ -51,8 +52,8 @@ pub async unsafe fn ring_reduce_scatter(
         let send_data = buf[send_off..send_off + chunk_bytes].to_vec();
 
         let (send_result, recv_result) = tokio::join!(
-            client.send_bytes(next as u32, &send_data),
-            client.recv_bytes(prev as u32),
+            collective_send(client, next as u32, &send_data, "reduce_scatter"),
+            collective_recv(client, prev as u32, "reduce_scatter"),
         );
         send_result?;
         let received = recv_result?;
@@ -131,7 +132,7 @@ macro_rules! impl_reducible {
                 }
                 #[inline]
                 fn read_le(bytes: &[u8]) -> Self {
-                    Self::from_le_bytes(bytes.try_into().unwrap())
+                    Self::from_le_bytes(bytes.try_into().expect("slice length matches type size"))
                 }
                 #[inline]
                 fn write_le(self, bytes: &mut [u8]) {
@@ -154,7 +155,7 @@ macro_rules! impl_reducible {
                 }
                 #[inline]
                 fn read_le(bytes: &[u8]) -> Self {
-                    Self::from_le_bytes(bytes.try_into().unwrap())
+                    Self::from_le_bytes(bytes.try_into().expect("slice length matches type size"))
                 }
                 #[inline]
                 fn write_le(self, bytes: &mut [u8]) {

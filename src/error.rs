@@ -58,6 +58,13 @@ pub enum NexarError {
     #[error("device adapter error: {0}")]
     DeviceError(String),
 
+    #[error("{operation} failed at rank {rank}: {reason}")]
+    CollectiveFailed {
+        operation: &'static str,
+        rank: Rank,
+        reason: String,
+    },
+
     #[error("operation cancelled")]
     Cancelled,
 }
@@ -82,6 +89,19 @@ mod tests {
             timeout_ms: 5000,
         };
         assert_eq!(e.to_string(), "barrier timed out after 5000ms (epoch 42)");
+    }
+
+    #[test]
+    fn test_collective_failed_display() {
+        let e = NexarError::CollectiveFailed {
+            operation: "allreduce",
+            rank: 3,
+            reason: "connection reset".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "allreduce failed at rank 3: connection reset"
+        );
     }
 
     #[test]
@@ -135,6 +155,11 @@ mod tests {
                 reason: "timeout".into(),
             },
             NexarError::DeviceError("oom".into()),
+            NexarError::CollectiveFailed {
+                operation: "allreduce",
+                rank: 2,
+                reason: "peer disconnected".into(),
+            },
             NexarError::Cancelled,
         ];
         for e in &errors {

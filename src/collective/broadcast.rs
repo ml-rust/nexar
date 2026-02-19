@@ -1,4 +1,5 @@
 use crate::client::NexarClient;
+use crate::collective::{collective_recv, collective_send};
 use crate::error::Result;
 use crate::types::{DataType, Rank};
 
@@ -33,12 +34,12 @@ pub async unsafe fn tree_broadcast(
 
         for r in 0..world {
             if r != root {
-                client.send_bytes(r, &data).await?;
+                collective_send(client, r, &data, "broadcast").await?;
             }
         }
     } else {
         // Non-root: receive data from root.
-        let received = client.recv_bytes(root).await?;
+        let received = collective_recv(client, root, "broadcast").await?;
         if received.len() != total_bytes {
             return Err(crate::error::NexarError::BufferSizeMismatch {
                 expected: total_bytes,
