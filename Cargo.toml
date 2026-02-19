@@ -3,17 +3,25 @@ name = "nexar"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Pure-Rust distributed runtime with QUIC transport"
+description = "Distributed runtime with QUIC transport, stream-multiplexed messaging, and built-in collectives"
+license = "Apache-2.0"
+repository = "https://github.com/ml-rust/nexar"
+readme = "README.md"
+keywords = ["distributed", "quic", "mpi", "allreduce", "hpc"]
+categories = ["network-programming", "asynchronous", "science"]
 
 [dependencies]
 quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+] }
 rkyv = { version = "0.8", features = ["alloc"] }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 thiserror = "2.0"
 tracing = "0.1"
-rcgen = "0.13"
+rcgen = "0.14"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
