@@ -5,6 +5,7 @@ pub mod device;
 pub mod error;
 pub mod memory;
 pub mod protocol;
+mod reduce;
 pub mod rpc;
 pub mod transport;
 pub mod types;
