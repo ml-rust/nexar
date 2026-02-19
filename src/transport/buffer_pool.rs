@@ -52,7 +52,14 @@ impl BufferPool {
     }
 
     /// Return a buffer to the pool. Called automatically by `PooledBuf::drop`.
+    ///
+    /// Buffers that have grown beyond 4x the default capacity are dropped instead
+    /// of returned, preventing a single large transfer from inflating the pool's
+    /// baseline memory usage.
     fn return_buf(&self, mut buf: Vec<u8>) {
+        if buf.capacity() > self.buf_capacity * 4 {
+            return; // drop oversized buffer
+        }
         buf.clear();
         // If pool is full, buf is simply dropped.
         let _ = self.queue.push(buf);
@@ -154,6 +161,23 @@ mod tests {
         assert_eq!(buf3.len(), 20);
         drop(buf2);
         drop(buf3);
+    }
+
+    #[test]
+    fn test_oversized_buffer_dropped_on_return() {
+        // Pool with buf_capacity=64. Threshold is 4x = 256.
+        let pool = BufferPool::with_config(2, 64);
+        // Checkout a buffer and grow it well beyond 4x capacity.
+        let buf = pool.checkout(1024);
+        assert_eq!(buf.len(), 1024);
+        drop(buf);
+        // The oversized buffer was dropped, not returned. Pool still has
+        // its original buffers. Checkout should give a normal-capacity buffer.
+        let buf2 = pool.checkout(10);
+        assert_eq!(buf2.len(), 10);
+        // The underlying Vec capacity should be the original pool capacity,
+        // not the inflated 1024.
+        drop(buf2);
     }
 
     #[test]
