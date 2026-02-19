@@ -384,8 +384,11 @@ impl NexarClient {
     }
 
     /// Barrier: block until all ranks reach this point.
+    ///
+    /// Automatically selects the best algorithm based on world size:
+    /// two-phase for small clusters, dissemination for larger ones.
     pub async fn barrier(&self) -> Result<()> {
-        crate::collective::two_phase_barrier(self, std::time::Duration::from_secs(30)).await
+        crate::collective::barrier(self, std::time::Duration::from_secs(30)).await
     }
 }
 

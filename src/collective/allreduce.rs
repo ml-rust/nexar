@@ -1,5 +1,5 @@
 use crate::client::NexarClient;
-use crate::collective::{collective_recv, collective_send};
+use crate::collective::helpers::{collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
@@ -38,8 +38,8 @@ pub async unsafe fn ring_allreduce(
     let data = unsafe { client.adapter().stage_for_send(ptr, total_bytes)? };
     let mut buf = data;
 
-    // Compute chunk boundaries. Handle uneven division by giving the last
-    // chunk any remainder.
+    // Compute chunk boundaries. Handle uneven division: first `remainder`
+    // chunks get one extra element.
     let base_chunk = count / world;
     let remainder = count % world;
 
@@ -51,13 +51,14 @@ pub async unsafe fn ring_allreduce(
         }
     };
 
-    let chunk_offset = |i: usize| -> usize {
-        let mut off = 0;
-        for j in 0..i {
-            off += chunk_count(j);
-        }
-        off
-    };
+    // Precompute prefix-sum offsets to avoid O(N²) recomputation per step.
+    let chunk_offsets: Vec<usize> = (0..world)
+        .scan(0usize, |acc, i| {
+            let off = *acc;
+            *acc += chunk_count(i);
+            Some(off)
+        })
+        .collect();
 
     let next = (rank + 1) % world;
     let prev = (rank + world - 1) % world;
@@ -66,12 +67,12 @@ pub async unsafe fn ring_allreduce(
     for step in 0..(world - 1) {
         // Send chunk index: rank - step (mod world).
         let send_idx = (rank + world - step) % world;
-        let send_off = chunk_offset(send_idx) * elem_size;
+        let send_off = chunk_offsets[send_idx] * elem_size;
         let send_len = chunk_count(send_idx) * elem_size;
 
         // Recv chunk index: rank - step - 1 (mod world).
         let recv_idx = (rank + world - step - 1) % world;
-        let recv_off = chunk_offset(recv_idx) * elem_size;
+        let recv_off = chunk_offsets[recv_idx] * elem_size;
         let recv_count = chunk_count(recv_idx);
         let recv_len = recv_count * elem_size;
 
@@ -101,11 +102,11 @@ pub async unsafe fn ring_allreduce(
     // Each round, forward the last received chunk around the ring.
     for step in 0..(world - 1) {
         let send_idx = (rank + world + 1 - step) % world;
-        let send_off = chunk_offset(send_idx) * elem_size;
+        let send_off = chunk_offsets[send_idx] * elem_size;
         let send_len = chunk_count(send_idx) * elem_size;
 
         let recv_idx = (rank + world - step) % world;
-        let recv_off = chunk_offset(recv_idx) * elem_size;
+        let recv_off = chunk_offsets[recv_idx] * elem_size;
         let recv_len = chunk_count(recv_idx) * elem_size;
 
         let send_data = buf[send_off..send_off + send_len].to_vec();

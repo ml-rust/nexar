@@ -1,5 +1,5 @@
 use crate::client::NexarClient;
-use crate::collective::{collective_recv, collective_send};
+use crate::collective::helpers::{collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::types::DataType;
 
