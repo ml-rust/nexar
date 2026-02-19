@@ -1,0 +1,20 @@
+[package]
+name = "nexar"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Pure-Rust distributed runtime with QUIC transport"
+
+[dependencies]
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rkyv = { version = "0.8", features = ["alloc"] }
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+thiserror = "2.0"
+tracing = "0.1"
+rcgen = "0.13"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = "0.3"
