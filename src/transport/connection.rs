@@ -31,34 +31,12 @@ impl PeerConnection {
     /// Send a control message as a framed uni stream.
     pub async fn send_message(&self, msg: &NexarMessage, priority: Priority) -> Result<()> {
         let buf = encode_message(msg, priority)?;
-        self.send_framed(&buf).await
+        self.send_tagged(STREAM_TAG_FRAMED, &buf).await
     }
 
     /// Send raw bytes on a new unidirectional stream (for bulk tensor data).
     pub async fn send_raw(&self, data: &[u8]) -> Result<()> {
-        let mut stream = self
-            .conn
-            .open_uni()
-            .await
-            .map_err(|e| NexarError::Transport(format!("open uni stream: {e}")))?;
-        // Write stream type tag.
-        stream
-            .write_all(&[STREAM_TAG_RAW])
-            .await
-            .map_err(|e| NexarError::Transport(format!("send_raw tag: {e}")))?;
-        // Write length prefix (u64 LE) then payload.
-        stream
-            .write_all(&(data.len() as u64).to_le_bytes())
-            .await
-            .map_err(|e| NexarError::Transport(format!("send_raw length: {e}")))?;
-        stream
-            .write_all(data)
-            .await
-            .map_err(|e| NexarError::Transport(format!("send_raw data: {e}")))?;
-        stream
-            .finish()
-            .map_err(|e| NexarError::Transport(format!("send_raw finish: {e}")))?;
-        Ok(())
+        self.send_tagged(STREAM_TAG_RAW, data).await
     }
 
     /// Get the remote address of this connection.
@@ -66,29 +44,29 @@ impl PeerConnection {
         self.conn.remote_address()
     }
 
-    /// Send framed data (length-prefixed) on a uni stream with stream type tag.
-    async fn send_framed(&self, data: &[u8]) -> Result<()> {
+    /// Open a uni stream, write the stream type tag + length-prefixed payload,
+    /// then finish. Shared by both framed and raw sends.
+    async fn send_tagged(&self, tag: u8, data: &[u8]) -> Result<()> {
         let mut stream = self
             .conn
             .open_uni()
             .await
             .map_err(|e| NexarError::Transport(format!("open uni stream: {e}")))?;
-        // Write stream type tag.
         stream
-            .write_all(&[STREAM_TAG_FRAMED])
+            .write_all(&[tag])
             .await
-            .map_err(|e| NexarError::Transport(format!("send_framed tag: {e}")))?;
+            .map_err(|e| NexarError::Transport(format!("write stream tag: {e}")))?;
         stream
             .write_all(&(data.len() as u64).to_le_bytes())
             .await
-            .map_err(|e| NexarError::Transport(format!("send_framed length: {e}")))?;
+            .map_err(|e| NexarError::Transport(format!("write length: {e}")))?;
         stream
             .write_all(data)
             .await
-            .map_err(|e| NexarError::Transport(format!("send_framed data: {e}")))?;
+            .map_err(|e| NexarError::Transport(format!("write payload: {e}")))?;
         stream
             .finish()
-            .map_err(|e| NexarError::Transport(format!("send_framed finish: {e}")))?;
+            .map_err(|e| NexarError::Transport(format!("finish stream: {e}")))?;
         Ok(())
     }
 }

@@ -294,33 +294,43 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) {
     }
 }
 
-/// Read a framed message from a stream (after the tag byte has been consumed).
-/// Uses the buffer pool for the read buffer; the pooled buffer is returned
-/// after decoding since the decoded `NexarMessage` is a separate allocation.
-/// Returns `None` on any read/decode error (logged and skipped).
-async fn read_framed(
+/// Read a length-prefixed payload from a stream into a pooled buffer.
+/// Returns `None` on any read error or if the message exceeds `MAX_MESSAGE_SIZE`.
+async fn read_length_prefixed(
     stream: &mut quinn::RecvStream,
     rank: Rank,
     pool: &Arc<BufferPool>,
-) -> Option<NexarMessage> {
+    label: &str,
+) -> Option<PooledBuf> {
     let mut len_buf = [0u8; 8];
     if let Err(e) = stream.read_exact(&mut len_buf).await {
-        tracing::warn!(rank, "router: framed length read failed: {e}");
+        tracing::warn!(rank, "router: {label} length read failed: {e}");
         return None;
     }
     let len = u64::from_le_bytes(len_buf);
     if len > MAX_MESSAGE_SIZE {
         tracing::warn!(
             rank,
-            "router: framed message too large ({len} bytes), skipping"
+            "router: {label} message too large ({len} bytes), skipping"
         );
         return None;
     }
     let mut buf = pool.checkout(len as usize);
     if let Err(e) = stream.read_exact(&mut buf).await {
-        tracing::warn!(rank, "router: framed payload read failed: {e}");
+        tracing::warn!(rank, "router: {label} payload read failed: {e}");
         return None;
     }
+    Some(buf)
+}
+
+/// Read a framed message from a stream (after the tag byte has been consumed).
+/// The pooled read buffer is returned to the pool after decoding.
+async fn read_framed(
+    stream: &mut quinn::RecvStream,
+    rank: Rank,
+    pool: &Arc<BufferPool>,
+) -> Option<NexarMessage> {
+    let buf = read_length_prefixed(stream, rank, pool, "framed").await?;
     match decode_message(&buf) {
         Ok((_, msg)) => Some(msg),
         Err(e) => {
@@ -328,35 +338,14 @@ async fn read_framed(
             None
         }
     }
-    // `buf` (PooledBuf) is dropped here, returning the buffer to the pool.
 }
 
 /// Read raw bytes from a stream (after the tag byte has been consumed).
-/// Uses the buffer pool for the read buffer. The `PooledBuf` is sent through
-/// the raw channel so the buffer stays pooled until the consumer drops it.
-/// Returns `None` on any read error (logged and skipped).
+/// The `PooledBuf` is sent through the raw channel and stays pooled until consumed.
 async fn read_raw(
     stream: &mut quinn::RecvStream,
     rank: Rank,
     pool: &Arc<BufferPool>,
 ) -> Option<PooledBuf> {
-    let mut len_buf = [0u8; 8];
-    if let Err(e) = stream.read_exact(&mut len_buf).await {
-        tracing::warn!(rank, "router: raw length read failed: {e}");
-        return None;
-    }
-    let len = u64::from_le_bytes(len_buf);
-    if len > MAX_MESSAGE_SIZE {
-        tracing::warn!(
-            rank,
-            "router: raw message too large ({len} bytes), skipping"
-        );
-        return None;
-    }
-    let mut buf = pool.checkout(len as usize);
-    if let Err(e) = stream.read_exact(&mut buf).await {
-        tracing::warn!(rank, "router: raw payload read failed: {e}");
-        return None;
-    }
-    Some(buf)
+    read_length_prefixed(stream, rank, pool, "raw").await
 }

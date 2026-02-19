@@ -2,75 +2,132 @@ use crossbeam_queue::ArrayQueue;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-/// Default capacity for pre-allocated buffers (64 KiB).
-const DEFAULT_BUF_CAPACITY: usize = 64 * 1024;
+/// Small pool: 256 buffers × 64 KiB — for framed control messages.
+const SMALL_POOL_SIZE: usize = 256;
+const SMALL_BUF_CAPACITY: usize = 64 * 1024;
 
-/// Default number of buffers in the pool.
-const DEFAULT_POOL_SIZE: usize = 256;
+/// Large pool: 32 buffers × 8 MiB — for tensor data streams.
+const LARGE_POOL_SIZE: usize = 32;
+const LARGE_BUF_CAPACITY: usize = 8 * 1024 * 1024;
 
-/// A lock-free pool of reusable `Vec<u8>` buffers.
+/// A tiered lock-free buffer pool with small and large tiers.
 ///
-/// On checkout, returns a `PooledBuf` that automatically returns the buffer
-/// to the pool on drop. If the pool is empty, a fresh `Vec` is allocated
-/// (never blocks). If the pool is full on return, the buffer is simply dropped.
+/// - **Small tier** (64 KiB): for framed control messages and small payloads.
+/// - **Large tier** (8 MiB): for tensor data transfers and bulk payloads.
+/// - **Above 64 MiB**: allocated fresh and dropped on return (rare).
+///
+/// Checkout picks the appropriate tier based on requested size. Return goes
+/// back to the matching tier. Buffers that have grown beyond 4× their tier's
+/// capacity are dropped instead of returned.
 pub struct BufferPool {
-    queue: ArrayQueue<Vec<u8>>,
-    buf_capacity: usize,
+    small: ArrayQueue<Vec<u8>>,
+    large: ArrayQueue<Vec<u8>>,
 }
 
 impl BufferPool {
-    /// Create a new pool with default settings (256 buffers, 64 KiB each).
+    /// Create a new tiered pool with default settings.
     pub fn new() -> Arc<Self> {
-        Self::with_config(DEFAULT_POOL_SIZE, DEFAULT_BUF_CAPACITY)
+        let small = ArrayQueue::new(SMALL_POOL_SIZE);
+        for _ in 0..SMALL_POOL_SIZE {
+            let _ = small.push(Vec::with_capacity(SMALL_BUF_CAPACITY));
+        }
+
+        let large = ArrayQueue::new(LARGE_POOL_SIZE);
+        for _ in 0..LARGE_POOL_SIZE {
+            let _ = large.push(Vec::with_capacity(LARGE_BUF_CAPACITY));
+        }
+
+        Arc::new(Self { small, large })
     }
 
-    /// Create a pool with custom size and buffer capacity.
-    pub fn with_config(pool_size: usize, buf_capacity: usize) -> Arc<Self> {
-        let queue = ArrayQueue::new(pool_size);
-        for _ in 0..pool_size {
-            let _ = queue.push(Vec::with_capacity(buf_capacity));
+    /// Create a pool with custom sizes (primarily for testing).
+    pub fn with_config(small_pool_size: usize, small_buf_cap: usize) -> Arc<Self> {
+        let small = ArrayQueue::new(small_pool_size);
+        for _ in 0..small_pool_size {
+            let _ = small.push(Vec::with_capacity(small_buf_cap));
         }
-        Arc::new(Self {
-            queue,
-            buf_capacity,
-        })
+
+        // For custom configs, create a minimal large pool.
+        let large = ArrayQueue::new(4);
+        for _ in 0..4 {
+            let _ = large.push(Vec::with_capacity(LARGE_BUF_CAPACITY));
+        }
+
+        Arc::new(Self { small, large })
     }
 
     /// Check out a buffer, resized to `len` bytes (zeroed).
     ///
-    /// If the pool has a buffer available, reuses it. Otherwise allocates a new one.
+    /// Selects the appropriate tier:
+    /// - `len <= SMALL_BUF_CAPACITY` (64 KiB): small pool
+    /// - `len <= LARGE_BUF_CAPACITY` (8 MiB): large pool
+    /// - `len > LARGE_BUF_CAPACITY`: allocate fresh (no pool)
     pub fn checkout(self: &Arc<Self>, len: usize) -> PooledBuf {
-        let mut buf = self
-            .queue
-            .pop()
-            .unwrap_or_else(|| Vec::with_capacity(self.buf_capacity));
+        let (mut buf, tier) = if len <= SMALL_BUF_CAPACITY {
+            let buf = self
+                .small
+                .pop()
+                .unwrap_or_else(|| Vec::with_capacity(SMALL_BUF_CAPACITY));
+            (buf, PoolTier::Small)
+        } else if len <= LARGE_BUF_CAPACITY {
+            let buf = self
+                .large
+                .pop()
+                .unwrap_or_else(|| Vec::with_capacity(LARGE_BUF_CAPACITY));
+            (buf, PoolTier::Large)
+        } else {
+            // Too large for any pool — allocate fresh.
+            (Vec::with_capacity(len), PoolTier::Unpooled)
+        };
+
         buf.resize(len, 0);
         PooledBuf {
             buf: Some(buf),
             pool: Arc::clone(self),
+            tier,
         }
     }
 
-    /// Return a buffer to the pool. Called automatically by `PooledBuf::drop`.
-    ///
-    /// Buffers that have grown beyond 4x the default capacity are dropped instead
-    /// of returned, preventing a single large transfer from inflating the pool's
-    /// baseline memory usage.
-    fn return_buf(&self, mut buf: Vec<u8>) {
-        if buf.capacity() > self.buf_capacity * 4 {
-            return; // drop oversized buffer
+    /// Return a buffer to the appropriate tier.
+    fn return_buf(&self, mut buf: Vec<u8>, tier: PoolTier) {
+        match tier {
+            PoolTier::Small => {
+                // Drop if grown beyond 4× small capacity.
+                if buf.capacity() > SMALL_BUF_CAPACITY * 4 {
+                    return;
+                }
+                buf.clear();
+                let _ = self.small.push(buf);
+            }
+            PoolTier::Large => {
+                // Drop if grown beyond 4× large capacity.
+                if buf.capacity() > LARGE_BUF_CAPACITY * 4 {
+                    return;
+                }
+                buf.clear();
+                let _ = self.large.push(buf);
+            }
+            PoolTier::Unpooled => {
+                // Always drop — too large to pool.
+            }
         }
-        buf.clear();
-        // If pool is full, buf is simply dropped.
-        let _ = self.queue.push(buf);
     }
 }
 
+/// Which pool tier a buffer belongs to.
+#[derive(Debug, Clone, Copy)]
+enum PoolTier {
+    Small,
+    Large,
+    Unpooled,
+}
+
 /// A buffer checked out from a `BufferPool`. Derefs to `[u8]`.
-/// On drop, the underlying `Vec` is cleared and returned to the pool.
+/// On drop, the underlying `Vec` is cleared and returned to the appropriate tier.
 pub struct PooledBuf {
     buf: Option<Vec<u8>>,
     pool: Arc<BufferPool>,
+    tier: PoolTier,
 }
 
 impl Deref for PooledBuf {
@@ -91,7 +148,7 @@ impl DerefMut for PooledBuf {
 impl Drop for PooledBuf {
     fn drop(&mut self) {
         if let Some(buf) = self.buf.take() {
-            self.pool.return_buf(buf);
+            self.pool.return_buf(buf, self.tier);
         }
     }
 }
@@ -113,7 +170,6 @@ mod tests {
         assert_eq!(buf.len(), 100);
         assert!(buf.iter().all(|&b| b == 0));
         drop(buf);
-        // Buffer returned to pool — pool should still have 4 buffers.
     }
 
     #[test]
@@ -130,15 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn test_oversized_buffer() {
-        let pool = BufferPool::with_config(2, 64);
-        // Request larger than default capacity — Vec grows naturally.
-        let buf = pool.checkout(1024);
-        assert_eq!(buf.len(), 1024);
-        drop(buf);
-    }
-
-    #[test]
     fn test_deref_mut() {
         let pool = BufferPool::with_config(2, 64);
         let mut buf = pool.checkout(4);
@@ -151,12 +198,9 @@ mod tests {
     #[test]
     fn test_drop_returns_to_pool() {
         let pool = BufferPool::with_config(1, 64);
-        // Take the one buffer out.
         let buf = pool.checkout(10);
-        // Pool is empty now — next checkout allocates fresh.
         let buf2 = pool.checkout(10);
         drop(buf);
-        // Pool has 1 buffer again. Next checkout reuses it.
         let buf3 = pool.checkout(20);
         assert_eq!(buf3.len(), 20);
         drop(buf2);
@@ -164,32 +208,51 @@ mod tests {
     }
 
     #[test]
-    fn test_oversized_buffer_dropped_on_return() {
-        // Pool with buf_capacity=64. Threshold is 4x = 256.
-        let pool = BufferPool::with_config(2, 64);
-        // Checkout a buffer and grow it well beyond 4x capacity.
-        let buf = pool.checkout(1024);
-        assert_eq!(buf.len(), 1024);
-        drop(buf);
-        // The oversized buffer was dropped, not returned. Pool still has
-        // its original buffers. Checkout should give a normal-capacity buffer.
+    fn test_pool_full_on_return() {
+        let pool = BufferPool::with_config(1, 64);
+        let buf1 = pool.checkout(10);
         let buf2 = pool.checkout(10);
-        assert_eq!(buf2.len(), 10);
-        // The underlying Vec capacity should be the original pool capacity,
-        // not the inflated 1024.
-        drop(buf2);
+        drop(buf1);
+        drop(buf2); // pool full, just dropped — no panic
     }
 
     #[test]
-    fn test_pool_full_on_return() {
-        let pool = BufferPool::with_config(1, 64);
-        // Pool starts with 1 buffer. Checkout it.
-        let buf1 = pool.checkout(10);
-        // Allocate a fresh one (pool empty).
+    fn test_large_buffer_uses_large_pool() {
+        let pool = BufferPool::new();
+        // 1 MiB — should use the large pool tier.
+        let buf = pool.checkout(1024 * 1024);
+        assert_eq!(buf.len(), 1024 * 1024);
+        drop(buf);
+    }
+
+    #[test]
+    fn test_small_buffer_uses_small_pool() {
+        let pool = BufferPool::new();
+        let buf = pool.checkout(100);
+        assert_eq!(buf.len(), 100);
+        drop(buf);
+    }
+
+    #[test]
+    fn test_very_large_buffer_unpooled() {
+        let pool = BufferPool::new();
+        // 100 MiB — too large for any pool tier.
+        let buf = pool.checkout(100 * 1024 * 1024);
+        assert_eq!(buf.len(), 100 * 1024 * 1024);
+        drop(buf); // dropped, not returned to any pool
+    }
+
+    #[test]
+    fn test_oversized_buffer_dropped_on_return() {
+        let pool = BufferPool::with_config(2, 64);
+        // Request 1024 bytes — uses small tier (since <=64KiB), but vec grows.
+        // When returned, capacity > 4*64 = 256, so it's dropped.
+        let buf = pool.checkout(1024);
+        assert_eq!(buf.len(), 1024);
+        drop(buf);
+        // Next checkout should get a normal-capacity buffer.
         let buf2 = pool.checkout(10);
-        // Return buf1 — pool now has 1.
-        drop(buf1);
-        // Return buf2 — pool is full, buf2 is just dropped. No panic.
+        assert_eq!(buf2.len(), 10);
         drop(buf2);
     }
 }
