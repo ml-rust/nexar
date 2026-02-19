@@ -1,3 +1,4 @@
+pub(crate) mod buffer_pool;
 mod connection;
 mod listener;
 pub mod router;

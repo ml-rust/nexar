@@ -1,15 +1,13 @@
-use crate::cluster::{SeedNode, WorkerNode};
 use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
 use crate::rpc::RpcDispatcher;
 use crate::rpc::registry::{RpcHandler, RpcRegistry};
 use crate::transport::PeerConnection;
+use crate::transport::buffer_pool::{BufferPool, PooledBuf};
 use crate::transport::router::PeerRouter;
-use crate::transport::tls::make_client_config;
 use crate::types::{Priority, Rank};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
@@ -50,6 +48,10 @@ pub struct NexarClient {
     /// Background tasks; kept alive for the lifetime of this client.
     _router_handles: Vec<tokio::task::JoinHandle<Result<()>>>,
     adapter: Arc<dyn DeviceAdapter>,
+    /// Shared buffer pool for router read buffers. Kept alive here so routers
+    /// (which hold `Arc<BufferPool>` clones) share the same pool.
+    #[allow(dead_code)]
+    pool: Arc<BufferPool>,
     barrier_epoch: AtomicU64,
     rpc_registry: Arc<RwLock<RpcRegistry>>,
     rpc_req_id: AtomicU64,
@@ -65,6 +67,7 @@ impl NexarClient {
         peers: HashMap<Rank, PeerConnection>,
         adapter: Arc<dyn DeviceAdapter>,
     ) -> Self {
+        let pool = BufferPool::new();
         let mut peer_arcs: HashMap<Rank, Arc<PeerConnection>> = HashMap::new();
         let mut routers: HashMap<Rank, PeerRouter> = HashMap::new();
         let mut handles = Vec::new();
@@ -73,7 +76,7 @@ impl NexarClient {
             // Clone the QUIC connection for the router.
             // quinn::Connection is cheaply cloneable (internally reference-counted).
             let conn_clone = peer_conn.conn.clone();
-            let (router, handle) = PeerRouter::spawn(peer_rank, conn_clone);
+            let (router, handle) = PeerRouter::spawn(peer_rank, conn_clone, Arc::clone(&pool));
             peer_arcs.insert(peer_rank, Arc::new(peer_conn));
             routers.insert(peer_rank, router);
             handles.push(handle);
@@ -86,6 +89,7 @@ impl NexarClient {
             routers,
             _router_handles: handles,
             adapter,
+            pool,
             barrier_epoch: AtomicU64::new(0),
             rpc_registry: Arc::new(RwLock::new(RpcRegistry::new())),
             rpc_req_id: AtomicU64::new(0),
@@ -208,128 +212,6 @@ impl NexarClient {
         router.recv_data(src).await
     }
 
-    /// Bootstrap a cluster: start a seed node and connect workers.
-    ///
-    /// This is a convenience for tests and simple deployments where
-    /// all nodes run in the same process (each as a tokio task).
-    pub async fn bootstrap_local(
-        world_size: u32,
-        adapter: Arc<dyn DeviceAdapter>,
-    ) -> Result<Vec<NexarClient>> {
-        let seed_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let seed = SeedNode::bind(seed_addr, world_size)?;
-        let seed_addr = seed.local_addr();
-
-        // Spawn seed.
-        let seed_handle = tokio::spawn(async move { seed.form_cluster().await });
-
-        // Spawn workers and collect their results.
-        let mut worker_handles = Vec::new();
-        for _ in 0..world_size {
-            worker_handles.push(tokio::spawn(WorkerNode::connect(seed_addr)));
-        }
-
-        let (_map, _seed_conns) = seed_handle
-            .await
-            .map_err(|e| NexarError::Transport(format!("seed task panicked: {e}")))??;
-
-        let mut workers: Vec<WorkerNode> = Vec::new();
-        for h in worker_handles {
-            workers.push(
-                h.await
-                    .map_err(|e| NexarError::Transport(format!("worker task panicked: {e}")))??,
-            );
-        }
-
-        // Each worker now has a connection to the seed but not to other workers.
-        // For a full mesh we need P2P connections. For simplicity in the current
-        // design, workers communicate via their seed connections using tagged
-        // messages. In production, workers would establish direct P2P connections.
-        //
-        // For now, we set up P2P connections between all workers.
-        Self::build_mesh(workers, adapter).await
-    }
-
-    /// Establish a full mesh of P2P connections between workers.
-    async fn build_mesh(
-        workers: Vec<WorkerNode>,
-        adapter: Arc<dyn DeviceAdapter>,
-    ) -> Result<Vec<NexarClient>> {
-        let n = workers.len();
-        if n == 1 {
-            // Single-node: no peers needed.
-            let w = workers.into_iter().next().unwrap();
-            return Ok(vec![NexarClient::new(
-                w.rank,
-                w.world_size,
-                HashMap::new(),
-                adapter,
-            )]);
-        }
-
-        // For multi-node mesh: each worker i (where i < j) listens, and worker j connects.
-        // We use each worker's seed connection endpoint to set up listeners.
-
-        // Bind a listener for each worker on a random port.
-        let mut listeners = Vec::new();
-        let mut listen_addrs = Vec::new();
-        for _ in 0..n {
-            let listener =
-                crate::transport::TransportListener::bind("127.0.0.1:0".parse().unwrap())?;
-            listen_addrs.push(listener.local_addr());
-            listeners.push(listener);
-        }
-
-        // Each worker needs connections to all other workers.
-        // Worker i will accept connections from workers j > i,
-        // and connect to workers j < i.
-        let client_config = make_client_config()?;
-
-        let mut all_peers: Vec<HashMap<Rank, PeerConnection>> =
-            (0..n).map(|_| HashMap::new()).collect();
-
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let rank_i = workers[i].rank;
-                let rank_j = workers[j].rank;
-                let addr_j = listen_addrs[j];
-
-                // Worker i connects to worker j.
-                let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
-                    .map_err(|e| NexarError::Transport(format!("mesh client: {e}")))?;
-                endpoint.set_default_client_config(client_config.clone());
-
-                // Spawn the accept on j's listener and the connect from a new endpoint concurrently.
-                let accept_fut = listeners[j].accept();
-                let connect_fut = endpoint.connect(addr_j, "localhost");
-
-                let connect_connecting =
-                    connect_fut.map_err(|e| NexarError::Transport(format!("mesh connect: {e}")))?;
-
-                let (accepted, connected) = tokio::try_join!(accept_fut, async {
-                    connected_result(connect_connecting).await
-                })?;
-
-                all_peers[i].insert(rank_j, PeerConnection::new(rank_j, connected));
-                all_peers[j].insert(rank_i, PeerConnection::new(rank_i, accepted));
-            }
-        }
-
-        let mut clients = Vec::new();
-        for (idx, peers) in all_peers.into_iter().enumerate() {
-            clients.push(NexarClient::new(
-                workers[idx].rank,
-                workers[idx].world_size,
-                peers,
-                Arc::clone(&adapter),
-            ));
-        }
-
-        // Sort by rank.
-        clients.sort_by_key(|c| c.rank);
-        Ok(clients)
-    }
-
     pub fn rank(&self) -> Rank {
         self.rank
     }
@@ -425,7 +307,7 @@ impl NexarClient {
     }
 
     /// Receive raw bytes from a peer (used by collective algorithms).
-    pub(crate) async fn recv_bytes(&self, src: Rank) -> Result<Vec<u8>> {
+    pub(crate) async fn recv_bytes(&self, src: Rank) -> Result<PooledBuf> {
         let router = self
             .routers
             .get(&src)
@@ -503,12 +385,6 @@ impl NexarClient {
     pub async fn barrier(&self) -> Result<()> {
         crate::collective::two_phase_barrier(self, std::time::Duration::from_secs(30)).await
     }
-}
-
-async fn connected_result(connecting: quinn::Connecting) -> Result<quinn::Connection> {
-    connecting
-        .await
-        .map_err(|e| NexarError::Transport(format!("mesh handshake: {e}")))
 }
 
 #[cfg(test)]

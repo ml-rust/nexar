@@ -1,6 +1,7 @@
 use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
 use crate::protocol::codec::decode_message;
+use crate::transport::buffer_pool::{BufferPool, PooledBuf};
 use crate::transport::connection::{STREAM_TAG_FRAMED, STREAM_TAG_RAW};
 use crate::types::Rank;
 use std::collections::HashMap;
@@ -55,7 +56,7 @@ pub struct PeerRouter {
     rpc_waiters: Arc<Mutex<HashMap<u64, oneshot::Sender<NexarMessage>>>>,
     pub control: Mutex<mpsc::Receiver<NexarMessage>>,
     pub data: Mutex<mpsc::Receiver<NexarMessage>>,
-    pub raw: Mutex<mpsc::Receiver<Vec<u8>>>,
+    pub raw: Mutex<mpsc::Receiver<PooledBuf>>,
 }
 
 /// Senders held by the background receive loop. Cloned into per-stream tasks.
@@ -66,7 +67,8 @@ struct RouterSenders {
     rpc_waiters: Arc<Mutex<HashMap<u64, oneshot::Sender<NexarMessage>>>>,
     control: mpsc::Sender<NexarMessage>,
     data: mpsc::Sender<NexarMessage>,
-    raw: mpsc::Sender<Vec<u8>>,
+    raw: mpsc::Sender<PooledBuf>,
+    pool: Arc<BufferPool>,
 }
 
 impl PeerRouter {
@@ -83,6 +85,7 @@ impl PeerRouter {
     pub fn spawn(
         rank: Rank,
         conn: quinn::Connection,
+        pool: Arc<BufferPool>,
     ) -> (Self, tokio::task::JoinHandle<Result<()>>) {
         let (rpc_req_tx, rpc_req_rx) = mpsc::channel(LANE_CAPACITY);
         let (ctrl_tx, ctrl_rx) = mpsc::channel(LANE_CAPACITY);
@@ -99,6 +102,7 @@ impl PeerRouter {
             control: ctrl_tx,
             data: data_tx,
             raw: raw_tx,
+            pool,
         };
 
         let handle = tokio::spawn(accept_loop(conn, senders));
@@ -159,7 +163,7 @@ impl PeerRouter {
     }
 
     /// Receive raw bytes from the raw lane.
-    pub async fn recv_raw(&self, rank: Rank) -> Result<Vec<u8>> {
+    pub async fn recv_raw(&self, rank: Rank) -> Result<PooledBuf> {
         self.raw
             .lock()
             .await
@@ -224,14 +228,14 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
 
     match tag_buf[0] {
         STREAM_TAG_FRAMED => {
-            let msg = match read_framed(&mut stream, tx.rank).await {
+            let msg = match read_framed(&mut stream, tx.rank, &tx.pool).await {
                 Some(m) => m,
                 None => return,
             };
             dispatch_framed(msg, tx).await;
         }
         STREAM_TAG_RAW => {
-            let buf = match read_raw(&mut stream, tx.rank).await {
+            let buf = match read_raw(&mut stream, tx.rank, &tx.pool).await {
                 Some(b) => b,
                 None => return,
             };
@@ -291,8 +295,14 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) {
 }
 
 /// Read a framed message from a stream (after the tag byte has been consumed).
+/// Uses the buffer pool for the read buffer; the pooled buffer is returned
+/// after decoding since the decoded `NexarMessage` is a separate allocation.
 /// Returns `None` on any read/decode error (logged and skipped).
-async fn read_framed(stream: &mut quinn::RecvStream, rank: Rank) -> Option<NexarMessage> {
+async fn read_framed(
+    stream: &mut quinn::RecvStream,
+    rank: Rank,
+    pool: &Arc<BufferPool>,
+) -> Option<NexarMessage> {
     let mut len_buf = [0u8; 8];
     if let Err(e) = stream.read_exact(&mut len_buf).await {
         tracing::warn!(rank, "router: framed length read failed: {e}");
@@ -306,7 +316,7 @@ async fn read_framed(stream: &mut quinn::RecvStream, rank: Rank) -> Option<Nexar
         );
         return None;
     }
-    let mut buf = vec![0u8; len as usize];
+    let mut buf = pool.checkout(len as usize);
     if let Err(e) = stream.read_exact(&mut buf).await {
         tracing::warn!(rank, "router: framed payload read failed: {e}");
         return None;
@@ -318,11 +328,18 @@ async fn read_framed(stream: &mut quinn::RecvStream, rank: Rank) -> Option<Nexar
             None
         }
     }
+    // `buf` (PooledBuf) is dropped here, returning the buffer to the pool.
 }
 
 /// Read raw bytes from a stream (after the tag byte has been consumed).
+/// Uses the buffer pool for the read buffer. The `PooledBuf` is sent through
+/// the raw channel so the buffer stays pooled until the consumer drops it.
 /// Returns `None` on any read error (logged and skipped).
-async fn read_raw(stream: &mut quinn::RecvStream, rank: Rank) -> Option<Vec<u8>> {
+async fn read_raw(
+    stream: &mut quinn::RecvStream,
+    rank: Rank,
+    pool: &Arc<BufferPool>,
+) -> Option<PooledBuf> {
     let mut len_buf = [0u8; 8];
     if let Err(e) = stream.read_exact(&mut len_buf).await {
         tracing::warn!(rank, "router: raw length read failed: {e}");
@@ -336,7 +353,7 @@ async fn read_raw(stream: &mut quinn::RecvStream, rank: Rank) -> Option<Vec<u8>>
         );
         return None;
     }
-    let mut buf = vec![0u8; len as usize];
+    let mut buf = pool.checkout(len as usize);
     if let Err(e) = stream.read_exact(&mut buf).await {
         tracing::warn!(rank, "router: raw payload read failed: {e}");
         return None;
