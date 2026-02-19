@@ -1,0 +1,30 @@
+[package]
+name = "nexar"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Distributed runtime with QUIC transport, stream-multiplexed messaging, and built-in collectives"
+license = "Apache-2.0"
+repository = "https://github.com/ml-rust/nexar"
+readme = "../README.md"
+keywords = ["distributed", "quic", "mpi", "allreduce", "hpc"]
+categories = ["network-programming", "asynchronous", "science"]
+
+[dependencies]
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+] }
+rkyv = { version = "0.8", features = ["alloc"] }
+tokio = { workspace = true }
+bytes = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rcgen = "0.14"
+crossbeam-queue = { workspace = true }
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = "0.3"

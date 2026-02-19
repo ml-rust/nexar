@@ -1,43 +1,13 @@
-[package]
-name = "nexar"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
-description = "Distributed runtime with QUIC transport, stream-multiplexed messaging, and built-in collectives"
-license = "Apache-2.0"
-repository = "https://github.com/ml-rust/nexar"
-readme = "README.md"
-keywords = ["distributed", "quic", "mpi", "allreduce", "hpc"]
-categories = ["network-programming", "asynchronous", "science"]
+[workspace]
+members = ["nexar", "nexar-rdma", "nexar-nccl"]
+resolver = "3"
 
-[dependencies]
-quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = [
-  "ring",
-  "std",
-] }
-rkyv = { version = "0.8", features = ["alloc"] }
+[workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-bytes = "1"
-thiserror = "2.0"
 tracing = "0.1"
-rcgen = "0.14"
+thiserror = "2.0"
 crossbeam-queue = "0.3"
-futures = "0.3"
-
-# Optional: hardware-accelerated transports
-ibverbs = { version = "0.9", optional = true }
-ibverbs-sys = { version = "0.3", optional = true }
-cudarc = { version = "0.19", optional = true, default-features = false, features = [
+indexmap = "2"
+cudarc = { version = "0.19", default-features = false, features = [
   "driver", "dynamic-loading", "std", "cuda-version-from-build-system", "fallback-latest",
 ] }
-
-[features]
-default = []
-rdma = ["dep:ibverbs"]
-cuda = ["dep:cudarc"]
-gpudirect = ["rdma", "cuda", "dep:ibverbs-sys"]
-
-[dev-dependencies]
-tokio = { version = "1", features = ["full", "test-util"] }
-tracing-subscriber = "0.3"

@@ -1,0 +1,23 @@
+[package]
+name = "nexar-nccl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "NCCL integration for nexar — hierarchical communicator combining NCCL intra-node with nexar inter-node"
+license = "Apache-2.0"
+repository = "https://github.com/ml-rust/nexar"
+keywords = ["nccl", "gpu", "distributed", "allreduce", "hpc"]
+readme = "README.md"
+categories = ["network-programming"]
+
+[dependencies]
+nexar = { path = "../nexar" }
+cudarc = { workspace = true, features = ["nccl"] }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+gethostname = "1"
+indexmap = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

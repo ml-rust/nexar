@@ -1,0 +1,26 @@
+[package]
+name = "nexar-rdma"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "RDMA and GPUDirect transport extensions for nexar"
+license = "Apache-2.0"
+repository = "https://github.com/ml-rust/nexar"
+keywords = ["rdma", "infiniband", "gpudirect", "distributed", "hpc"]
+readme = "README.md"
+categories = ["network-programming"]
+
+[dependencies]
+nexar = { path = "../nexar" }
+ibverbs = "0.9"
+crossbeam-queue = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# Optional: GPUDirect RDMA (GPU memory → NIC directly)
+ibverbs-sys = { version = "0.3", optional = true }
+cudarc = { workspace = true, optional = true }
+
+[features]
+default = []
+gpudirect = ["dep:ibverbs-sys", "dep:cudarc"]

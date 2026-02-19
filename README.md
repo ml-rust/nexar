@@ -15,7 +15,7 @@ nexar takes a different approach:
 - **QUIC transport** (via quinn). Multiplexed streams mean a stalled tensor transfer doesn't block your barrier. TLS is built into the protocol.
 - **No process launcher.** A lightweight seed node handles discovery. Workers connect, get a rank, and form a direct peer-to-peer mesh. Nodes can join and leave.
 - **Zero-config by default.** Pure Rust QUIC transport works everywhere with `cargo build`. No `mpirun`, no `libfabric`, no `libucp`.
-- **Hardware acceleration when available.** Optional RDMA (`--features rdma`) for InfiniBand/RoCE kernel bypass. Optional GPUDirect (`--features gpudirect`) for GPU memory → NIC direct transfer. Same pattern as CUDA in the rest of the ml-rust stack.
+- **Hardware acceleration when available.** Optional RDMA via the `nexar-rdma` crate for InfiniBand/RoCE kernel bypass. Optional GPUDirect for GPU memory → NIC direct transfer. Same pattern as CUDA in the rest of the ml-rust stack.
 - **Async-native.** Built on tokio. Send and receive overlap naturally.
 
 ## What it provides
@@ -26,10 +26,15 @@ nexar takes a different approach:
 
 **Collectives:**
 
-- `ring_allreduce` — scatter-reduce + allgather over a ring
-- `tree_broadcast` — fan-out from root
-- `ring_allgather` — ring-based gather
-- `ring_reduce_scatter` — ring-based reduce-scatter
+- `all_reduce` — ring-based scatter-reduce + allgather
+- `broadcast` — tree-based fan-out from root
+- `all_gather` — ring-based gather
+- `reduce_scatter` — ring-based reduce-scatter
+- `reduce` — tree-based reduce to root
+- `all_to_all` — all-to-all exchange
+- `gather` — gather to root
+- `scatter` — scatter from root
+- `scan` / `exclusive_scan` — inclusive/exclusive prefix scan
 - `barrier` — distributed synchronization (two-phase for small clusters, dissemination for larger)
 
 **RPC:**
@@ -38,7 +43,7 @@ nexar takes a different approach:
 
 **Device abstraction:**
 
-- `DeviceAdapter` trait lets GPU backends stage memory for network I/O without nexar knowing anything about CUDA or ROCm. `CpuAdapter` is included; `CudaAdapter` is available with `--features cuda`.
+- `DeviceAdapter` trait lets GPU backends stage memory for network I/O without nexar knowing anything about CUDA or ROCm. `CpuAdapter` is included; `CudaAdapter` is available via the `nexar-rdma` crate (with the `gpudirect` feature).
 
 ## Quick start
 
@@ -83,22 +88,22 @@ async fn main() -> nexar::Result<()> {
 
 ## Examples
 
-Runnable examples in [`examples/`](examples/):
+Runnable examples in [`nexar/examples/`](nexar/examples/):
 
-| Example                                  | What it shows                                                         |
-| ---------------------------------------- | --------------------------------------------------------------------- |
-| [`send_recv`](examples/send_recv.rs)     | Point-to-point tagged send/recv between two ranks                     |
-| [`allreduce`](examples/allreduce.rs)     | Ring-allreduce (Sum) across 4 ranks                                   |
-| [`broadcast`](examples/broadcast.rs)     | Tree broadcast from root to all ranks                                 |
-| [`barrier`](examples/barrier.rs)         | Barrier synchronization with staggered arrivals                       |
-| [`rpc`](examples/rpc.rs)                 | Register a remote function, call it across ranks                      |
-| [`seed_worker`](examples/seed_worker.rs) | Manual cluster setup with seed/worker nodes (real deployment pattern) |
+| Example                                            | What it shows                                                         |
+| -------------------------------------------------- | --------------------------------------------------------------------- |
+| [`send_recv`](nexar/examples/send_recv.rs)         | Point-to-point tagged send/recv between two ranks                     |
+| [`allreduce`](nexar/examples/allreduce.rs)         | Ring-allreduce (Sum) across 4 ranks                                   |
+| [`broadcast`](nexar/examples/broadcast.rs)         | Tree broadcast from root to all ranks                                 |
+| [`barrier`](nexar/examples/barrier.rs)             | Barrier synchronization with staggered arrivals                       |
+| [`rpc`](nexar/examples/rpc.rs)                     | Register a remote function, call it across ranks                      |
+| [`seed_worker`](nexar/examples/seed_worker.rs)     | Manual cluster setup with seed/worker nodes (real deployment pattern) |
 
 Run any example with:
 
 ```bash
-cargo run --example send_recv
-cargo run --example allreduce
+cargo run -p nexar --example send_recv
+cargo run -p nexar --example allreduce
 ```
 
 ## Architecture
@@ -154,24 +159,33 @@ Messages are serialized with rkyv (zero-copy deserialization). Maximum message s
 ## Building
 
 ```bash
-cargo build --release                       # Pure Rust QUIC (works everywhere)
-cargo build --release --features cuda       # + CUDA device staging (requires CUDA runtime)
-cargo build --release --features rdma       # + RDMA (requires libibverbs / rdma-core)
-cargo build --release --features gpudirect  # + GPUDirect RDMA (requires libibverbs + CUDA)
-cargo test
-cargo clippy --all-targets
+# Core (pure Rust, zero C deps)
+cargo build -p nexar --release
+
+# RDMA transport (requires libibverbs / rdma-core)
+cargo build -p nexar-rdma --release
+
+# GPUDirect RDMA (requires libibverbs + CUDA)
+cargo build -p nexar-rdma --release --features gpudirect
+
+# Hierarchical NCCL + nexar (requires CUDA + NCCL)
+cargo build -p nexar-nccl --release
+
+# Full workspace
+cargo test --workspace
+cargo clippy --workspace --all-targets
 ```
 
 Requires Rust 1.85+.
 
-## Feature flags
+## Workspace crates
 
-| Feature     | What it enables                                          | C dependency                |
-| ----------- | -------------------------------------------------------- | --------------------------- |
-| _(default)_ | QUIC transport via quinn                                 | None                        |
-| `cuda`      | `CudaAdapter` for GPU↔host memory staging                | CUDA runtime                |
-| `rdma`      | InfiniBand/RoCE kernel bypass via ibverbs                | `libibverbs` (rdma-core)    |
-| `gpudirect` | GPU memory → RDMA NIC directly (enables `rdma` + `cuda`) | `libibverbs` + CUDA runtime |
+| Crate                      | What it provides                                                        | C dependencies              |
+| -------------------------- | ----------------------------------------------------------------------- | --------------------------- |
+| `nexar`                    | Core runtime: QUIC transport, collectives, RPC                          | None                        |
+| `nexar-rdma`               | RDMA transport extension (InfiniBand/RoCE kernel bypass)                | `libibverbs` (rdma-core)    |
+| `nexar-rdma` + `gpudirect` | GPU memory → RDMA NIC directly, `CudaAdapter`                           | `libibverbs` + CUDA runtime |
+| `nexar-nccl`               | Hierarchical communicator: NCCL intra-node + nexar inter-node           | CUDA runtime + NCCL         |
 
 ## License
 
