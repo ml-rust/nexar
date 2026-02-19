@@ -58,6 +58,22 @@ pub enum NexarMessage {
         src_rank: Rank,
         payload: Vec<u8>,
     },
+
+    /// RDMA endpoint exchange for mesh formation (feature = "rdma").
+    /// Carries the IB QP endpoint info needed for RDMA handshake.
+    RdmaEndpoint {
+        /// Local ID (LID) of the HCA port.
+        lid: u16,
+        /// Queue Pair Number.
+        qpn: u32,
+        /// Packet Sequence Number.
+        psn: u32,
+        /// Global ID (GID) as 16 bytes (IPv6 format).
+        gid: Vec<u8>,
+    },
+
+    /// Communicator split request: carries (color, key) for group formation.
+    SplitRequest { color: u32, key: u32 },
 }
 
 #[cfg(test)]
@@ -131,6 +147,13 @@ mod tests {
                 src_rank: 0,
                 payload: vec![0xFF; 64],
             },
+            NexarMessage::RdmaEndpoint {
+                lid: 1,
+                qpn: 42,
+                psn: 100,
+                gid: vec![0; 16],
+            },
+            NexarMessage::SplitRequest { color: 0, key: 1 },
         ];
 
         for msg in messages {

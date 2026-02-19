@@ -18,5 +18,6 @@ pub use device::{CpuAdapter, DeviceAdapter};
 pub use error::{NexarError, Result};
 pub use memory::GlobalPtr;
 pub use protocol::NexarMessage;
+pub use transport::buffer_pool::PoolProfile;
 pub use transport::{PeerConnection, TransportListener};
 pub use types::{DataType, NodeId, Priority, Rank, ReduceOp};

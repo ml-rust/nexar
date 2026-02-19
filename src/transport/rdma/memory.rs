@@ -12,32 +12,25 @@ use std::sync::Arc;
 
 /// A pool of pre-registered RDMA memory regions for zero-allocation send/recv.
 pub struct RdmaMemoryPool {
-    /// Raw pointer to the RdmaContext for on-demand allocation.
-    /// Valid as long as the caller keeps the RdmaContext alive.
-    ctx_ptr: *const RdmaContext,
+    ctx: Arc<RdmaContext>,
     buf_size: usize,
     queue: ArrayQueue<ibverbs::MemoryRegion<u8>>,
 }
 
-// Safety: MemoryRegion<u8> is Send+Sync, and we require the RdmaContext to
-// outlive the pool.
+// Safety: MemoryRegion<u8> is Send+Sync per ibverbs docs, Arc is Send+Sync.
 unsafe impl Send for RdmaMemoryPool {}
 unsafe impl Sync for RdmaMemoryPool {}
 
 impl RdmaMemoryPool {
     /// Create a pool with `pool_size` pre-registered buffers of `buf_size` bytes.
-    ///
-    /// # Safety contract
-    ///
-    /// The caller must ensure `ctx` outlives the returned `RdmaMemoryPool`.
-    pub fn new(ctx: &RdmaContext, pool_size: usize, buf_size: usize) -> Result<Arc<Self>> {
+    pub fn new(ctx: &Arc<RdmaContext>, pool_size: usize, buf_size: usize) -> Result<Arc<Self>> {
         let queue = ArrayQueue::new(pool_size);
         for _ in 0..pool_size {
             let mr = ctx.allocate(buf_size)?;
             let _ = queue.push(mr);
         }
         Ok(Arc::new(Self {
-            ctx_ptr: ctx as *const RdmaContext,
+            ctx: Arc::clone(ctx),
             buf_size,
             queue,
         }))
@@ -49,10 +42,7 @@ impl RdmaMemoryPool {
     pub fn checkout(self: &Arc<Self>) -> Result<RdmaPooledBuf> {
         let mr = match self.queue.pop() {
             Some(mr) => mr,
-            None => {
-                let ctx = unsafe { &*self.ctx_ptr };
-                ctx.allocate(self.buf_size)?
-            }
+            None => self.ctx.allocate(self.buf_size)?,
         };
         Ok(RdmaPooledBuf {
             mr: Some(mr),

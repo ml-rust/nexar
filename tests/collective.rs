@@ -1,6 +1,7 @@
 use nexar::rpc::RpcHandler;
 use nexar::{CpuAdapter, DataType, NexarClient, ReduceOp};
 use std::sync::Arc;
+use tokio::sync::Barrier;
 
 /// Helper: run a collective operation across N clients concurrently.
 /// Keeps all clients alive until every task completes.
@@ -442,4 +443,276 @@ async fn test_rpc_call_and_response() {
     responder.await.unwrap();
 
     assert_eq!(result, vec![3, 2, 1, 0xFF]);
+}
+
+// ============================================================================
+// Reduce tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_reduce_2_nodes_sum() {
+    run_collective(2, |client| async move {
+        let rank = client.rank();
+        let mut data = vec![(rank + 1) as f32; 4];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .reduce(ptr, 4, DataType::F32, ReduceOp::Sum, 0)
+                .await
+                .unwrap();
+        }
+
+        if rank == 0 {
+            // Root gets the sum: 1 + 2 = 3
+            assert_eq!(data, vec![3.0f32; 4], "root reduce failed");
+        }
+        // Non-root buffers are unspecified.
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_reduce_4_nodes_sum() {
+    run_collective(4, |client| async move {
+        let rank = client.rank();
+        let mut data = vec![(rank + 1) as f32; 4];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .reduce(ptr, 4, DataType::F32, ReduceOp::Sum, 0)
+                .await
+                .unwrap();
+        }
+
+        if rank == 0 {
+            // 1 + 2 + 3 + 4 = 10
+            assert_eq!(data, vec![10.0f32; 4], "root reduce 4-node failed");
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_reduce_3_nodes_nonzero_root() {
+    run_collective(3, |client| async move {
+        let rank = client.rank();
+        let root = 2;
+        let mut data = vec![(rank + 1) as f32; 4];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .reduce(ptr, 4, DataType::F32, ReduceOp::Sum, root)
+                .await
+                .unwrap();
+        }
+
+        if rank == root {
+            // 1 + 2 + 3 = 6
+            assert_eq!(data, vec![6.0f32; 4], "root reduce nonzero-root failed");
+        }
+    })
+    .await;
+}
+
+// ============================================================================
+// All-to-all tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_alltoall_2_nodes() {
+    run_collective(2, |client| async move {
+        let rank = client.rank();
+        // Each rank sends 2 elements to each peer (2 * 2 = 4 total).
+        let send_data: Vec<f32> = vec![
+            (rank * 10) as f32,
+            (rank * 10 + 1) as f32,
+            (rank * 10 + 2) as f32,
+            (rank * 10 + 3) as f32,
+        ];
+        let mut recv_data: Vec<f32> = vec![0.0; 4];
+
+        let send_ptr = send_data.as_ptr() as u64;
+        let recv_ptr = recv_data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .all_to_all(send_ptr, recv_ptr, 2, DataType::F32)
+                .await
+                .unwrap();
+        }
+
+        // Rank 0 sends [0,1] to rank 0, [2,3] to rank 1.
+        // Rank 1 sends [10,11] to rank 0, [12,13] to rank 1.
+        // Rank 0 receives: [0,1] from self, [10,11] from rank 1.
+        // Rank 1 receives: [2,3] from rank 0, [12,13] from self.
+        let expected = if rank == 0 {
+            vec![0.0, 1.0, 10.0, 11.0]
+        } else {
+            vec![2.0, 3.0, 12.0, 13.0]
+        };
+        assert_eq!(recv_data, expected, "rank {rank} alltoall failed");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_alltoall_4_nodes() {
+    run_collective(4, |client| async move {
+        let rank = client.rank() as usize;
+        // Each rank sends 1 element to each peer (1 * 4 = 4 total).
+        let send_data: Vec<i32> = (0..4).map(|dest| (rank * 100 + dest) as i32).collect();
+        let mut recv_data: Vec<i32> = vec![0; 4];
+
+        let send_ptr = send_data.as_ptr() as u64;
+        let recv_ptr = recv_data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .all_to_all(send_ptr, recv_ptr, 1, DataType::I32)
+                .await
+                .unwrap();
+        }
+
+        // Rank r receives: from rank 0: 0*100+r, from rank 1: 1*100+r, etc.
+        let expected: Vec<i32> = (0..4).map(|src| (src * 100 + rank) as i32).collect();
+        assert_eq!(recv_data, expected, "rank {rank} alltoall 4-node failed");
+    })
+    .await;
+}
+
+// ============================================================================
+// Scan tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_scan_3_nodes_sum() {
+    run_collective(3, |client| async move {
+        let rank = client.rank();
+        let mut data = vec![(rank + 1) as f32; 4];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .scan(ptr, 4, DataType::F32, ReduceOp::Sum)
+                .await
+                .unwrap();
+        }
+
+        // Inclusive scan with Sum:
+        // Rank 0: 1, Rank 1: 1+2=3, Rank 2: 1+2+3=6
+        let expected = match rank {
+            0 => 1.0,
+            1 => 3.0,
+            2 => 6.0,
+            _ => unreachable!(),
+        };
+        assert_eq!(data, vec![expected; 4], "rank {rank} scan failed");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_scan_4_nodes_sum() {
+    run_collective(4, |client| async move {
+        let rank = client.rank();
+        let mut data = vec![1.0f32; 2];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .scan(ptr, 2, DataType::F32, ReduceOp::Sum)
+                .await
+                .unwrap();
+        }
+
+        // Each rank starts with 1.0. Inclusive scan:
+        // Rank 0: 1, Rank 1: 2, Rank 2: 3, Rank 3: 4
+        let expected = (rank + 1) as f32;
+        assert_eq!(data, vec![expected; 2], "rank {rank} scan 4-node failed");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_scan_2_nodes_max() {
+    run_collective(2, |client| async move {
+        let rank = client.rank();
+        let mut data = vec![(rank + 1) as f32; 4];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .scan(ptr, 4, DataType::F32, ReduceOp::Max)
+                .await
+                .unwrap();
+        }
+
+        // Inclusive max scan: Rank 0: 1, Rank 1: max(1,2)=2
+        let expected = match rank {
+            0 => 1.0,
+            1 => 2.0,
+            _ => unreachable!(),
+        };
+        assert_eq!(data, vec![expected; 4], "rank {rank} scan max failed");
+    })
+    .await;
+}
+
+// ============================================================================
+// Split tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_split_two_groups() {
+    // 4 ranks split into 2 groups of 2.
+    // Ranks 0,1 -> color 0, Ranks 2,3 -> color 1.
+    // Each group does allreduce within its group.
+    let adapter = Arc::new(CpuAdapter::new());
+    let clients = NexarClient::bootstrap_local(4, adapter).await.unwrap();
+    let clients: Vec<Arc<NexarClient>> = clients.into_iter().map(Arc::new).collect();
+
+    let barrier = Arc::new(Barrier::new(4));
+    let mut handles = Vec::new();
+
+    for c in &clients {
+        let c = Arc::clone(c);
+        let barrier = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            let rank = c.rank();
+            let color = if rank < 2 { 0u32 } else { 1u32 };
+            let key = rank;
+
+            let sub = c.split(color, key).await.unwrap();
+
+            assert_eq!(sub.world_size(), 2, "rank {rank}: sub world size wrong");
+
+            // Within each group, do allreduce.
+            let mut data = vec![(rank + 1) as f32; 4];
+            let ptr = data.as_mut_ptr() as u64;
+
+            unsafe {
+                sub.all_reduce(ptr, 4, DataType::F32, ReduceOp::Sum)
+                    .await
+                    .unwrap();
+            }
+
+            // Group 0 (ranks 0,1): 1 + 2 = 3
+            // Group 1 (ranks 2,3): 3 + 4 = 7
+            let expected = if rank < 2 { 3.0f32 } else { 7.0f32 };
+            assert_eq!(
+                data,
+                vec![expected; 4],
+                "rank {rank} split allreduce failed"
+            );
+
+            barrier.wait().await;
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
 }

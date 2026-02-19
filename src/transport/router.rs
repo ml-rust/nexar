@@ -2,7 +2,7 @@ use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
 use crate::protocol::codec::decode_message;
 use crate::transport::buffer_pool::{BufferPool, PooledBuf};
-use crate::transport::connection::{STREAM_TAG_FRAMED, STREAM_TAG_RAW};
+use crate::transport::connection::{STREAM_TAG_FRAMED, STREAM_TAG_RAW, STREAM_TAG_RAW_COMM};
 use crate::types::Rank;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,8 +12,6 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 const LANE_CAPACITY: usize = 256;
 
 /// Maximum number of concurrent in-flight stream handler tasks per peer.
-/// Prevents a noisy/malicious peer from exhausting runtime resources by
-/// opening streams faster than they can be processed.
 const MAX_CONCURRENT_STREAMS: usize = 512;
 
 /// Maximum framed message size accepted by the router (4 GiB).
@@ -22,41 +20,28 @@ const MAX_MESSAGE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 /// A demultiplexer that runs a single receive loop on a QUIC connection and
 /// routes incoming streams to typed channels by stream type tag and message variant.
 ///
-/// Without this, multiple consumers (RPC serve loop, barrier, collectives)
-/// calling `recv_message` or `recv_raw` on the same peer would race for QUIC
-/// streams, stealing messages meant for other subsystems.
-///
-/// Every QUIC uni stream opened by the remote peer begins with a 1-byte tag:
-/// - `0x01` (STREAM_TAG_FRAMED): a framed `NexarMessage`; routed by variant.
-/// - `0x02` (STREAM_TAG_RAW): raw bulk bytes; routed to the `raw` channel.
-///
 /// # Lanes
 ///
-/// Each lane's receiver is wrapped in its own `Mutex` so that concurrent
-/// consumers can wait on different lanes for the same peer without blocking
-/// each other.
-///
-/// - **`rpc_requests`** (`Rpc` variants) — consumed by the RPC dispatcher serve loop.
-/// - **`rpc_responses`** — keyed by `req_id`; each `rpc()` call registers a
-///   oneshot channel for its specific request, so concurrent RPCs to the same
-///   peer never steal each other's responses.
-/// - **`control`** (Barrier, BarrierAck, Heartbeat, NodeJoined, NodeLeft, Hello, Welcome) —
-///   consumed by barrier logic and health monitors.
-/// - **`data`** (`Data` variants) — consumed by point-to-point `recv`.
-/// - **`raw`** — raw byte streams (bulk tensor transfers).
-///
-/// # No Cross-Lane Head-of-Line Blocking
-///
-/// Each accepted QUIC stream is read and dispatched in its own spawned task.
-/// If one lane's channel is full, that task's `.send().await` blocks only that
-/// task — the main `accept_uni` loop and all other lanes remain unblocked.
-/// Messages are never dropped due to backpressure.
+/// - **`rpc_requests`** (`Rpc` variants)
+/// - **`rpc_responses`** — keyed by `req_id`
+/// - **`control`** (Barrier, BarrierAck, Heartbeat, etc.)
+/// - **`data`** (`Data` variants)
+/// - **`raw`** — raw byte streams (default comm_id 0)
+/// - **`raw_comms`** — per-comm_id raw byte streams (for split communicators)
 pub struct PeerRouter {
     pub rpc_requests: Mutex<mpsc::Receiver<NexarMessage>>,
     rpc_waiters: Arc<Mutex<HashMap<u64, oneshot::Sender<NexarMessage>>>>,
     pub control: Mutex<mpsc::Receiver<NexarMessage>>,
     pub data: Mutex<mpsc::Receiver<NexarMessage>>,
     pub raw: Mutex<mpsc::Receiver<PooledBuf>>,
+    /// Per-comm_id raw channels for split communicators.
+    raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>>,
+}
+
+/// A registered communicator channel with sender and receiver.
+struct CommChannel {
+    tx: mpsc::Sender<PooledBuf>,
+    rx: Option<mpsc::Receiver<PooledBuf>>,
 }
 
 /// Senders held by the background receive loop. Cloned into per-stream tasks.
@@ -68,20 +53,12 @@ struct RouterSenders {
     control: mpsc::Sender<NexarMessage>,
     data: mpsc::Sender<NexarMessage>,
     raw: mpsc::Sender<PooledBuf>,
+    raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>>,
     pool: Arc<BufferPool>,
 }
 
 impl PeerRouter {
     /// Spawn a background receive loop for `conn` and return the router.
-    ///
-    /// Takes the raw `quinn::Connection` directly to avoid lifetime coupling
-    /// with `PeerConnection`. Only the receive side of the connection is used here;
-    /// the `PeerConnection` (wrapping the same `quinn::Connection` clone) handles
-    /// sending independently.
-    ///
-    /// The returned `JoinHandle` resolves when the connection closes or an
-    /// unrecoverable transport error occurs. Callers should monitor it to
-    /// detect peer disconnection.
     pub fn spawn(
         rank: Rank,
         conn: quinn::Connection,
@@ -95,6 +72,8 @@ impl PeerRouter {
         let rpc_waiters: Arc<Mutex<HashMap<u64, oneshot::Sender<NexarMessage>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
+        let raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>> = Arc::new(Mutex::new(HashMap::new()));
+
         let senders = RouterSenders {
             rank,
             rpc_requests: rpc_req_tx,
@@ -102,6 +81,7 @@ impl PeerRouter {
             control: ctrl_tx,
             data: data_tx,
             raw: raw_tx,
+            raw_comms: Arc::clone(&raw_comms),
             pool,
         };
 
@@ -113,23 +93,38 @@ impl PeerRouter {
             control: Mutex::new(ctrl_rx),
             data: Mutex::new(data_rx),
             raw: Mutex::new(raw_rx),
+            raw_comms,
         };
 
         (router, handle)
     }
 
-    /// Register a oneshot waiter for a specific RPC `req_id` and return the
-    /// receiver. When the router receives an `RpcResponse` with this `req_id`,
-    /// it delivers it directly to this waiter — no queue contention.
+    /// Register a oneshot waiter for a specific RPC `req_id`.
     pub async fn register_rpc_waiter(&self, req_id: u64) -> oneshot::Receiver<NexarMessage> {
         let (tx, rx) = oneshot::channel();
         self.rpc_waiters.lock().await.insert(req_id, tx);
         rx
     }
 
-    /// Remove a previously registered waiter (e.g. on send failure cleanup).
+    /// Remove a previously registered waiter.
     pub async fn remove_rpc_waiter(&self, req_id: u64) {
         self.rpc_waiters.lock().await.remove(&req_id);
+    }
+
+    /// Register a communicator channel and return the receiver.
+    /// Called during `split()` to set up per-comm_id routing.
+    pub async fn register_comm(&self, comm_id: u32) -> mpsc::Receiver<PooledBuf> {
+        let (tx, rx) = mpsc::channel(LANE_CAPACITY);
+        let mut comms = self.raw_comms.lock().await;
+        comms.insert(comm_id, CommChannel { tx, rx: None });
+        rx
+    }
+
+    /// Take the receiver for a previously registered comm channel.
+    /// Used internally when constructing a split client.
+    pub async fn take_comm_receiver(&self, comm_id: u32) -> Option<mpsc::Receiver<PooledBuf>> {
+        let mut comms = self.raw_comms.lock().await;
+        comms.get_mut(&comm_id).and_then(|ch| ch.rx.take())
     }
 
     /// Receive the next message from the control lane.
@@ -162,7 +157,7 @@ impl PeerRouter {
             .ok_or(NexarError::PeerDisconnected { rank })
     }
 
-    /// Receive raw bytes from the raw lane.
+    /// Receive raw bytes from the raw lane (default comm_id 0).
     pub async fn recv_raw(&self, rank: Rank) -> Result<PooledBuf> {
         self.raw
             .lock()
@@ -173,17 +168,7 @@ impl PeerRouter {
     }
 }
 
-/// The accept loop: accepts incoming QUIC uni streams and spawns a task per
-/// stream to read and dispatch the message. This ensures that a blocked lane
-/// (full channel) does not prevent other streams from being accepted and
-/// dispatched — no cross-lane head-of-line blocking, and no message drops.
-///
-/// A semaphore caps concurrent in-flight tasks to `MAX_CONCURRENT_STREAMS`,
-/// preventing a noisy peer from exhausting runtime resources.
-///
-/// On exit (connection closed), all pending RPC waiters are drained so that
-/// `rpc()` callers blocked on `rx.await` receive `PeerDisconnected` instead
-/// of hanging forever.
+/// The accept loop: accepts incoming QUIC uni streams and spawns a task per stream.
 async fn accept_loop(conn: quinn::Connection, tx: RouterSenders) -> Result<()> {
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS));
 
@@ -191,15 +176,11 @@ async fn accept_loop(conn: quinn::Connection, tx: RouterSenders) -> Result<()> {
         let stream = match conn.accept_uni().await {
             Ok(s) => s,
             Err(_) => {
-                // Connection closed — drain all pending RPC waiters so their
-                // oneshot::Senders are dropped, unblocking any rpc() callers.
                 tx.rpc_waiters.lock().await.clear();
                 return Ok(());
             }
         };
 
-        // Acquire a permit before spawning. If all permits are taken, this
-        // awaits until a previous stream task completes, providing backpressure.
         let permit = Arc::clone(&semaphore)
             .acquire_owned()
             .await
@@ -208,15 +189,13 @@ async fn accept_loop(conn: quinn::Connection, tx: RouterSenders) -> Result<()> {
         let tx = tx.clone();
         tokio::spawn(async move {
             handle_stream(stream, &tx).await;
-            drop(permit); // release the concurrency slot
+            drop(permit);
         });
     }
 }
 
 /// Read a single stream (tag + payload) and dispatch to the correct lane.
-/// Runs in its own task so `.send().await` backpressure is isolated.
 async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
-    // Read the 1-byte stream type tag.
     let mut tag_buf = [0u8; 1];
     if stream.read_exact(&mut tag_buf).await.is_err() {
         tracing::warn!(
@@ -239,9 +218,35 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
                 Some(b) => b,
                 None => return,
             };
-            // .send().await blocks only this task if the raw lane is full.
             if tx.raw.send(buf).await.is_err() {
                 tracing::warn!(rank = tx.rank, "router: raw receiver dropped");
+            }
+        }
+        STREAM_TAG_RAW_COMM => {
+            // Read 4-byte comm_id, then length-prefixed payload.
+            let mut comm_id_buf = [0u8; 4];
+            if stream.read_exact(&mut comm_id_buf).await.is_err() {
+                tracing::warn!(rank = tx.rank, "router: failed to read comm_id");
+                return;
+            }
+            let comm_id = u32::from_le_bytes(comm_id_buf);
+
+            let buf = match read_raw(&mut stream, tx.rank, &tx.pool).await {
+                Some(b) => b,
+                None => return,
+            };
+
+            let comms = tx.raw_comms.lock().await;
+            if let Some(ch) = comms.get(&comm_id) {
+                if ch.tx.send(buf).await.is_err() {
+                    tracing::warn!(rank = tx.rank, comm_id, "router: comm raw receiver dropped");
+                }
+            } else {
+                tracing::warn!(
+                    rank = tx.rank,
+                    comm_id,
+                    "router: no registered comm channel, discarding"
+                );
             }
         }
         other => {
@@ -255,7 +260,6 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
 }
 
 /// Route a decoded framed message to the correct lane.
-/// `.send().await` blocks only this task if the target lane is full.
 async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) {
     match msg {
         NexarMessage::Rpc { .. } => {
@@ -281,7 +285,9 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) {
         | NexarMessage::NodeJoined { .. }
         | NexarMessage::NodeLeft { .. }
         | NexarMessage::Hello { .. }
-        | NexarMessage::Welcome { .. } => {
+        | NexarMessage::Welcome { .. }
+        | NexarMessage::RdmaEndpoint { .. }
+        | NexarMessage::SplitRequest { .. } => {
             if tx.control.send(msg).await.is_err() {
                 tracing::warn!(rank = tx.rank, "router: control receiver dropped");
             }
@@ -295,7 +301,6 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) {
 }
 
 /// Read a length-prefixed payload from a stream into a pooled buffer.
-/// Returns `None` on any read error or if the message exceeds `MAX_MESSAGE_SIZE`.
 async fn read_length_prefixed(
     stream: &mut quinn::RecvStream,
     rank: Rank,
@@ -324,7 +329,6 @@ async fn read_length_prefixed(
 }
 
 /// Read a framed message from a stream (after the tag byte has been consumed).
-/// The pooled read buffer is returned to the pool after decoding.
 async fn read_framed(
     stream: &mut quinn::RecvStream,
     rank: Rank,
@@ -341,7 +345,6 @@ async fn read_framed(
 }
 
 /// Read raw bytes from a stream (after the tag byte has been consumed).
-/// The `PooledBuf` is sent through the raw channel and stays pooled until consumed.
 async fn read_raw(
     stream: &mut quinn::RecvStream,
     rank: Rank,

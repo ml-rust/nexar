@@ -122,6 +122,47 @@ impl SyncClient {
         })
     }
 
+    /// Reduce to root.
+    ///
+    /// # Safety
+    /// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+    pub unsafe fn reduce(
+        &self,
+        ptr: u64,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt
+            .block_on(unsafe { self.inner.reduce(ptr, count, dtype, op, root) })
+    }
+
+    /// All-to-all.
+    ///
+    /// # Safety
+    /// - `send_ptr`: `count * world_size * dtype.size_in_bytes()` bytes.
+    /// - `recv_ptr`: `count * world_size * dtype.size_in_bytes()` bytes.
+    pub unsafe fn all_to_all(
+        &self,
+        send_ptr: u64,
+        recv_ptr: u64,
+        count: usize,
+        dtype: DataType,
+    ) -> Result<()> {
+        self.rt
+            .block_on(unsafe { self.inner.all_to_all(send_ptr, recv_ptr, count, dtype) })
+    }
+
+    /// Inclusive prefix scan.
+    ///
+    /// # Safety
+    /// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+    pub unsafe fn scan(&self, ptr: u64, count: usize, dtype: DataType, op: ReduceOp) -> Result<()> {
+        self.rt
+            .block_on(unsafe { self.inner.scan(ptr, count, dtype, op) })
+    }
+
     /// Point-to-point send.
     ///
     /// # Safety
@@ -138,6 +179,26 @@ impl SyncClient {
     pub unsafe fn recv(&self, ptr: u64, size: usize, src: Rank, tag: u32) -> Result<()> {
         self.rt
             .block_on(unsafe { self.inner.recv(ptr, size, src, tag) })
+    }
+
+    /// Send raw bytes directly from GPU memory.
+    ///
+    /// # Safety
+    /// `gpu_ptr` must be a valid CUDA device pointer for `size` bytes.
+    #[cfg(feature = "gpudirect")]
+    pub fn send_bytes_gpu(&self, dest: Rank, gpu_ptr: u64, size: usize) -> Result<()> {
+        self.rt
+            .block_on(self.inner.send_bytes_gpu(dest, gpu_ptr, size))
+    }
+
+    /// Receive raw bytes directly into GPU memory.
+    ///
+    /// # Safety
+    /// `gpu_ptr` must be a valid CUDA device pointer for `size` bytes.
+    #[cfg(feature = "gpudirect")]
+    pub fn recv_bytes_gpu(&self, src: Rank, gpu_ptr: u64, size: usize) -> Result<()> {
+        self.rt
+            .block_on(self.inner.recv_bytes_gpu(src, gpu_ptr, size))
     }
 
     /// Barrier.

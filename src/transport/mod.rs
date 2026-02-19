@@ -1,4 +1,4 @@
-pub(crate) mod buffer_pool;
+pub mod buffer_pool;
 mod connection;
 mod listener;
 #[cfg(feature = "rdma")]

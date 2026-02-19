@@ -15,31 +15,27 @@
 
 use crate::error::{NexarError, Result};
 use crate::types::Rank;
+use std::sync::Arc;
 
 /// Shared per-device RDMA resources.
 ///
 /// Owns the ibverbs `Context`, protection domain, and completion queues.
 /// All RDMA connections created from this context share these resources.
 ///
-/// # Safety
+/// Heap-allocated via `Box` to ensure stable addresses. The ibverbs objects
+/// borrow from `Context`, so we transmute their lifetimes to `'static` —
+/// safe because field drop order guarantees CQs and PD drop before Context.
 ///
-/// The raw pointers are valid for the lifetime of `RdmaContext` because we
-/// own `_ctx` which keeps the device context alive, and `_pd`/`_send_cq`/
-/// `_recv_cq` are stored alongside it, preventing drop reordering.
+/// CQs are protected by Mutexes to allow safe concurrent polling from
+/// multiple QPs.
 pub struct RdmaContext {
-    // These fields exist solely to prevent the ibverbs objects from being
-    // dropped. They must be declared in reverse-dependency order so that
-    // the PD and CQs are dropped before the Context.
-    _send_cq: ibverbs::CompletionQueue<'static>,
-    _recv_cq: ibverbs::CompletionQueue<'static>,
-    _pd: ibverbs::ProtectionDomain<'static>,
+    // Fields declared in reverse-dependency order so that the PD and CQs
+    // are dropped before the Context.
+    send_cq: std::sync::Mutex<ibverbs::CompletionQueue<'static>>,
+    recv_cq: std::sync::Mutex<ibverbs::CompletionQueue<'static>>,
+    pd: ibverbs::ProtectionDomain<'static>,
     // Context must be last — everything borrows from it.
     _ctx: Box<ibverbs::Context>,
-
-    // Raw pointers for actual use (derived from the owned objects above).
-    pd_ptr: *mut ibverbs::ProtectionDomain<'static>,
-    send_cq_ptr: *mut ibverbs::CompletionQueue<'static>,
-    recv_cq_ptr: *mut ibverbs::CompletionQueue<'static>,
 }
 
 // Safety: ibverbs types are Send+Sync per the crate docs.
@@ -84,48 +80,39 @@ impl RdmaContext {
             .alloc_pd()
             .map_err(|e| NexarError::DeviceError(format!("alloc PD: {e}")))?;
 
-        let mut result = Self {
-            pd_ptr: std::ptr::null_mut(),
-            send_cq_ptr: std::ptr::null_mut(),
-            recv_cq_ptr: std::ptr::null_mut(),
-            _send_cq: send_cq,
-            _recv_cq: recv_cq,
-            _pd: pd,
+        Ok(Self {
+            send_cq: std::sync::Mutex::new(send_cq),
+            recv_cq: std::sync::Mutex::new(recv_cq),
+            pd,
             _ctx: ctx,
-        };
-        // Set the raw pointers to point at the owned fields.
-        result.pd_ptr = &mut result._pd as *mut _;
-        result.send_cq_ptr = &mut result._send_cq as *mut _;
-        result.recv_cq_ptr = &mut result._recv_cq as *mut _;
-        Ok(result)
-    }
-
-    fn pd(&self) -> &ibverbs::ProtectionDomain<'static> {
-        unsafe { &*self.pd_ptr }
-    }
-
-    fn send_cq(&self) -> &ibverbs::CompletionQueue<'static> {
-        unsafe { &*self.send_cq_ptr }
-    }
-
-    fn recv_cq(&self) -> &ibverbs::CompletionQueue<'static> {
-        unsafe { &*self.recv_cq_ptr }
+        })
     }
 
     /// Allocate a registered memory region of `size` bytes.
     pub fn allocate(&self, size: usize) -> Result<ibverbs::MemoryRegion<u8>> {
-        self.pd()
+        self.pd
             .allocate::<u8>(size)
             .map_err(|e| NexarError::DeviceError(format!("allocate MR: {e}")))
     }
 
     /// Prepare a new RDMA connection (QP in INIT state) for the given peer.
-    pub fn prepare_connection(&self, peer_rank: Rank) -> Result<PreparedRdmaConnection> {
-        let mut builder = self.pd().create_qp(
-            self.send_cq(),
-            self.recv_cq(),
-            ibverbs::ibv_qp_type::IBV_QPT_RC,
-        );
+    ///
+    /// Each QP gets references to the shared CQs (protected by Mutex in
+    /// `RdmaContext`). The `RdmaConnection` stores `Arc<RdmaContext>` to
+    /// ensure CQ lifetime and provide synchronized CQ access.
+    pub fn prepare_connection(self: &Arc<Self>, peer_rank: Rank) -> Result<PreparedRdmaConnection> {
+        let send_cq = self
+            .send_cq
+            .lock()
+            .map_err(|e| NexarError::DeviceError(format!("send CQ lock poisoned: {e}")))?;
+        let recv_cq = self
+            .recv_cq
+            .lock()
+            .map_err(|e| NexarError::DeviceError(format!("recv CQ lock poisoned: {e}")))?;
+
+        let mut builder = self
+            .pd
+            .create_qp(&send_cq, &recv_cq, ibverbs::ibv_qp_type::IBV_QPT_RC);
         builder
             .allow_remote_rw()
             .set_max_send_wr(128)
@@ -133,16 +120,25 @@ impl RdmaContext {
         let pqp = builder
             .build()
             .map_err(|e| NexarError::DeviceError(format!("build QP: {e}")))?;
+
+        // Safety: The CQ guards are released here, but the underlying CQs
+        // live inside the Arc<RdmaContext> which the PreparedRdmaConnection
+        // holds a reference to. The transmute to 'static is safe because
+        // we guarantee the RdmaContext (and its CQs) outlive the QP.
+        let pqp = unsafe {
+            std::mem::transmute::<ibverbs::PreparedQueuePair<'_>, ibverbs::PreparedQueuePair<'static>>(
+                pqp,
+            )
+        };
+
+        // CQ guards are dropped here (after transmute erases the borrow).
+        drop(send_cq);
+        drop(recv_cq);
+
         Ok(PreparedRdmaConnection {
-            pqp: unsafe {
-                std::mem::transmute::<
-                    ibverbs::PreparedQueuePair<'_>,
-                    ibverbs::PreparedQueuePair<'static>,
-                >(pqp)
-            },
+            pqp,
             peer_rank,
-            send_cq_ptr: self.send_cq_ptr,
-            recv_cq_ptr: self.recv_cq_ptr,
+            ctx: Arc::clone(self),
         })
     }
 }
@@ -151,8 +147,7 @@ impl RdmaContext {
 pub struct PreparedRdmaConnection {
     pqp: ibverbs::PreparedQueuePair<'static>,
     peer_rank: Rank,
-    send_cq_ptr: *mut ibverbs::CompletionQueue<'static>,
-    recv_cq_ptr: *mut ibverbs::CompletionQueue<'static>,
+    ctx: Arc<RdmaContext>,
 }
 
 // Safety: ibverbs types are thread-safe per docs.
@@ -179,8 +174,7 @@ impl PreparedRdmaConnection {
             qp: unsafe {
                 std::mem::transmute::<ibverbs::QueuePair<'_>, ibverbs::QueuePair<'static>>(qp)
             },
-            send_cq_ptr: self.send_cq_ptr,
-            recv_cq_ptr: self.recv_cq_ptr,
+            ctx: self.ctx,
         })
     }
 }
@@ -189,12 +183,14 @@ impl PreparedRdmaConnection {
 pub struct RdmaConnection {
     _peer_rank: Rank,
     qp: ibverbs::QueuePair<'static>,
-    send_cq_ptr: *mut ibverbs::CompletionQueue<'static>,
-    recv_cq_ptr: *mut ibverbs::CompletionQueue<'static>,
+    ctx: Arc<RdmaContext>,
 }
 
 unsafe impl Send for RdmaConnection {}
 unsafe impl Sync for RdmaConnection {}
+
+/// Default timeout for CQ polling (5 seconds).
+const CQ_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl RdmaConnection {
     /// Post an RDMA send and wait for completion.
@@ -205,8 +201,7 @@ impl RdmaConnection {
                 .post_send(mr, 0..len, wr_id)
                 .map_err(|e| NexarError::DeviceError(format!("post_send: {e}")))?;
         }
-        self.wait_send_completion()?;
-        Ok(())
+        self.wait_send_completion()
     }
 
     /// Post an RDMA receive and wait for completion.
@@ -217,13 +212,16 @@ impl RdmaConnection {
                 .post_receive(mr, 0..len, wr_id)
                 .map_err(|e| NexarError::DeviceError(format!("post_receive: {e}")))?;
         }
-        self.wait_recv_completion()?;
-        Ok(())
+        self.wait_recv_completion()
     }
 
     /// Poll the send CQ without blocking. Returns completed work request IDs.
     pub fn poll_send_cq(&self) -> Result<Vec<u64>> {
-        let cq = unsafe { &*self.send_cq_ptr };
+        let cq = self
+            .ctx
+            .send_cq
+            .lock()
+            .map_err(|e| NexarError::DeviceError(format!("send CQ lock poisoned: {e}")))?;
         let mut completions = [ibverbs::ibv_wc::default(); 16];
         let done = cq
             .poll(&mut completions)
@@ -234,7 +232,11 @@ impl RdmaConnection {
 
     /// Poll the recv CQ without blocking. Returns completed work request IDs.
     pub fn poll_recv_cq(&self) -> Result<Vec<u64>> {
-        let cq = unsafe { &*self.recv_cq_ptr };
+        let cq = self
+            .ctx
+            .recv_cq
+            .lock()
+            .map_err(|e| NexarError::DeviceError(format!("recv CQ lock poisoned: {e}")))?;
         let mut completions = [ibverbs::ibv_wc::default(); 16];
         let done = cq
             .poll(&mut completions)
@@ -244,24 +246,39 @@ impl RdmaConnection {
     }
 
     fn wait_send_completion(&self) -> Result<()> {
-        poll_until_complete(unsafe { &*self.send_cq_ptr })
+        poll_until_complete(&self.ctx.send_cq, CQ_POLL_TIMEOUT)
     }
 
     fn wait_recv_completion(&self) -> Result<()> {
-        poll_until_complete(unsafe { &*self.recv_cq_ptr })
+        poll_until_complete(&self.ctx.recv_cq, CQ_POLL_TIMEOUT)
     }
 }
 
-/// Spin-poll a CQ until at least one completion arrives.
-fn poll_until_complete(cq: &ibverbs::CompletionQueue<'_>) -> Result<()> {
+/// Poll a Mutex-protected CQ until at least one completion arrives, with timeout.
+fn poll_until_complete(
+    cq_mutex: &std::sync::Mutex<ibverbs::CompletionQueue<'static>>,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let start = std::time::Instant::now();
     let mut completions = [ibverbs::ibv_wc::default(); 1];
     loop {
-        let done = cq
-            .poll(&mut completions)
-            .map_err(|e| NexarError::DeviceError(format!("poll CQ: {e}")))?;
-        if !done.is_empty() {
-            check_completions(done)?;
-            return Ok(());
+        {
+            let cq = cq_mutex
+                .lock()
+                .map_err(|e| NexarError::DeviceError(format!("CQ lock poisoned: {e}")))?;
+            let done = cq
+                .poll(&mut completions)
+                .map_err(|e| NexarError::DeviceError(format!("poll CQ: {e}")))?;
+            if !done.is_empty() {
+                check_completions(done)?;
+                return Ok(());
+            }
+        }
+        if start.elapsed() > timeout {
+            return Err(NexarError::DeviceError(format!(
+                "CQ poll timed out after {}ms",
+                timeout.as_millis()
+            )));
         }
         std::hint::spin_loop();
     }

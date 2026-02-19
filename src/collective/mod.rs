@@ -1,12 +1,18 @@
 mod allgather;
 mod allreduce;
+mod alltoall;
 mod barrier;
 mod broadcast;
 mod helpers;
+mod reduce;
 mod reduce_scatter;
+mod scan;
 
 pub use allgather::ring_allgather;
 pub use allreduce::ring_allreduce;
+pub use alltoall::alltoall;
 pub use barrier::barrier;
 pub use broadcast::tree_broadcast;
+pub use reduce::tree_reduce;
 pub use reduce_scatter::ring_reduce_scatter;
+pub use scan::inclusive_scan;
