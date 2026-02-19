@@ -1,5 +1,7 @@
 # nexar
 
+[![Crates.io](https://img.shields.io/crates/v/nexar.svg)](https://crates.io/crates/nexar) [![docs.rs](https://docs.rs/nexar/badge.svg)](https://docs.rs/nexar) [![CI](https://github.com/ml-rust/nexar/actions/workflows/ci.yml/badge.svg)](https://github.com/ml-rust/nexar/actions) [![License](https://img.shields.io/crates/l/nexar.svg)](LICENSE)
+
 Distributed runtime for Rust. QUIC transport, stream-multiplexed messaging, built-in collectives. No C dependencies.
 
 nexar replaces MPI for inter-node communication. It handles the network layer — point-to-point transfers, allreduce, broadcast, barrier — so your distributed application doesn't have to shell out to `mpirun` or link against libfabric.
@@ -43,7 +45,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-nexar = { path = "../nexar" }
+nexar = "<use-latest-version>"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -63,11 +65,10 @@ async fn main() -> nexar::Result<()> {
     assert_eq!(client.rank(), 0);
     assert_eq!(client.world_size(), 4);
 
-    // Run allreduce across all ranks.
+    // Run allreduce in-place across all ranks.
     let mut data = vec![1.0f32; 1024];
     unsafe {
         client.all_reduce(
-            data.as_ptr() as u64,
             data.as_mut_ptr() as u64,
             1024,
             DataType::F32,
@@ -77,6 +78,26 @@ async fn main() -> nexar::Result<()> {
 
     Ok(())
 }
+```
+
+## Examples
+
+Runnable examples in [`examples/`](examples/):
+
+| Example                                  | What it shows                                                         |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| [`send_recv`](examples/send_recv.rs)     | Point-to-point tagged send/recv between two ranks                     |
+| [`allreduce`](examples/allreduce.rs)     | Ring-allreduce (Sum) across 4 ranks                                   |
+| [`broadcast`](examples/broadcast.rs)     | Tree broadcast from root to all ranks                                 |
+| [`barrier`](examples/barrier.rs)         | Barrier synchronization with staggered arrivals                       |
+| [`rpc`](examples/rpc.rs)                 | Register a remote function, call it across ranks                      |
+| [`seed_worker`](examples/seed_worker.rs) | Manual cluster setup with seed/worker nodes (real deployment pattern) |
+
+Run any example with:
+
+```bash
+cargo run --example send_recv
+cargo run --example allreduce
 ```
 
 ## Architecture
