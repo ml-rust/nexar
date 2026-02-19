@@ -13,12 +13,18 @@ pub enum NexarMessage {
         capabilities: u64,
     },
 
-    /// Seed's response with rank assignment and peer list.
+    /// Seed's response with rank assignment, peer list, and mTLS credentials.
     Welcome {
         rank: Rank,
         world_size: u32,
         /// `(rank, socket_addr_string)` for each peer.
         peers: Vec<(Rank, String)>,
+        /// DER-encoded cluster CA certificate (trust anchor for mesh mTLS).
+        ca_cert: Vec<u8>,
+        /// DER-encoded leaf certificate for this node, signed by the cluster CA.
+        node_cert: Vec<u8>,
+        /// DER-encoded private key for this node's leaf certificate.
+        node_key: Vec<u8>,
     },
 
     /// Barrier request: all ranks must reach this epoch before proceeding.
@@ -76,6 +82,9 @@ mod tests {
             rank: 3,
             world_size: 8,
             peers: vec![(0, "127.0.0.1:5000".into()), (1, "127.0.0.1:5001".into())],
+            ca_cert: vec![1, 2, 3],
+            node_cert: vec![4, 5, 6],
+            node_key: vec![7, 8, 9],
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
         let deserialized: NexarMessage =
@@ -94,6 +103,9 @@ mod tests {
                 rank: 0,
                 world_size: 1,
                 peers: vec![],
+                ca_cert: vec![10],
+                node_cert: vec![20],
+                node_key: vec![30],
             },
             NexarMessage::Barrier { epoch: 42 },
             NexarMessage::BarrierAck { epoch: 42 },

@@ -2,7 +2,7 @@ use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
 use crate::protocol::codec::{decode_message, encode_message};
 use crate::protocol::header::HEADER_SIZE;
-use crate::transport::tls::make_client_config;
+use crate::transport::tls::make_bootstrap_client_config;
 use crate::types::{PROTOCOL_VERSION, Priority, Rank};
 use std::net::SocketAddr;
 
@@ -12,12 +12,22 @@ pub struct WorkerNode {
     pub world_size: u32,
     pub peers: Vec<(Rank, String)>,
     pub seed_conn: quinn::Connection,
+    /// DER-encoded cluster CA certificate (trust anchor for mesh mTLS).
+    pub ca_cert: Vec<u8>,
+    /// DER-encoded leaf certificate for this node, signed by the cluster CA.
+    pub node_cert: Vec<u8>,
+    /// DER-encoded private key for this node's leaf certificate.
+    pub node_key: Vec<u8>,
 }
 
 impl WorkerNode {
     /// Connect to the seed node, complete the handshake, and receive rank assignment.
+    ///
+    /// The initial connection uses insecure TLS (bootstrap). After receiving
+    /// the Welcome message with CA-signed credentials, all subsequent mesh
+    /// connections use mutual TLS.
     pub async fn connect(seed_addr: SocketAddr) -> Result<Self> {
-        let client_config = make_client_config()?;
+        let client_config = make_bootstrap_client_config()?;
 
         // Bind a local UDP socket.
         let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
@@ -71,11 +81,17 @@ impl WorkerNode {
                 rank,
                 world_size,
                 peers,
+                ca_cert,
+                node_cert,
+                node_key,
             } => Ok(WorkerNode {
                 rank,
                 world_size,
                 peers,
                 seed_conn: conn,
+                ca_cert,
+                node_cert,
+                node_key,
             }),
             other => Err(NexarError::DecodeFailed(format!(
                 "expected Welcome, got {other:?}"
@@ -105,6 +121,10 @@ mod tests {
         assert_eq!(worker.rank, 0);
         assert_eq!(worker.world_size, 1);
         assert_eq!(worker.peers.len(), 1);
+        // Verify mTLS credentials were received.
+        assert!(!worker.ca_cert.is_empty());
+        assert!(!worker.node_cert.is_empty());
+        assert!(!worker.node_key.is_empty());
     }
 
     #[tokio::test]
@@ -132,6 +152,10 @@ mod tests {
         assert_eq!(w2.world_size, 2);
         assert_eq!(w1.peers.len(), 2);
         assert_eq!(w2.peers.len(), 2);
+        // Both workers should have the same CA cert.
+        assert_eq!(w1.ca_cert, w2.ca_cert);
+        // But different node certs (unique per node).
+        assert_ne!(w1.node_cert, w2.node_cert);
     }
 
     #[tokio::test]

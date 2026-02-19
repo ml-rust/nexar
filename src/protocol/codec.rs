@@ -96,6 +96,9 @@ mod tests {
             peers: (0..128)
                 .map(|i| (i, format!("10.0.{}.{}:9000", i / 256, i % 256)))
                 .collect(),
+            ca_cert: vec![1, 2, 3],
+            node_cert: vec![4, 5, 6],
+            node_key: vec![7, 8, 9],
         };
         let buf = encode_message(&msg, Priority::Realtime).unwrap();
         let (_, decoded) = decode_message(&buf).unwrap();

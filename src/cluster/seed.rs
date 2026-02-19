@@ -4,6 +4,7 @@ use crate::protocol::NexarMessage;
 use crate::protocol::codec::{decode_message, encode_message};
 use crate::protocol::header::HEADER_SIZE;
 use crate::transport::TransportListener;
+use crate::transport::tls::ClusterCa;
 use crate::types::{PROTOCOL_VERSION, Priority, Rank};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -11,7 +12,9 @@ use std::time::Duration;
 /// The seed node orchestrates cluster formation.
 ///
 /// It listens for incoming workers, assigns ranks, and distributes the
-/// peer table once enough workers have joined.
+/// peer table once enough workers have joined. During formation, it
+/// generates an ephemeral CA and issues per-node certificates for
+/// mutual TLS on the P2P mesh.
 pub struct SeedNode {
     listener: TransportListener,
     expected_world_size: u32,
@@ -42,12 +45,20 @@ impl SeedNode {
 
     /// Wait for all expected workers to join and distribute the peer table.
     ///
+    /// Generates an ephemeral cluster CA and issues a CA-signed leaf
+    /// certificate to each worker via the Welcome message. Workers use
+    /// these credentials for mutual TLS on the P2P mesh.
+    ///
     /// Returns the cluster map and the list of QUIC connections (one per worker),
     /// in rank order (rank 0 = seed itself conceptually, ranks 1..N = workers).
     ///
     /// The seed does NOT assign itself a rank in the communicator — it is purely
     /// a coordination node. Workers get ranks 0..world_size-1.
     pub async fn form_cluster(&self) -> Result<(ClusterMap, Vec<quinn::Connection>)> {
+        // Generate ephemeral CA for this cluster's lifetime.
+        let ca = ClusterCa::generate()?;
+        let ca_cert_der = ca.cert_der();
+
         let mut map = ClusterMap::new();
         let mut connections: Vec<(
             Rank,
@@ -127,14 +138,19 @@ impl SeedNode {
         // Build peer table.
         let peers = map.alive_peers();
 
-        // Send Welcome to each worker with their assigned rank.
-        // We need to consume `connections` to get owned SendStreams, so collect conns separately.
+        // Send Welcome to each worker with their assigned rank and mTLS credentials.
         let mut conns = Vec::with_capacity(connections.len());
         for (rank, conn, mut send, _recv) in connections {
+            // Issue a unique leaf certificate for this worker.
+            let (node_cert, node_key) = ca.issue_cert("localhost")?;
+
             let welcome = NexarMessage::Welcome {
                 rank,
                 world_size: self.expected_world_size,
                 peers: peers.clone(),
+                ca_cert: ca_cert_der.to_vec(),
+                node_cert: node_cert.to_vec(),
+                node_key: node_key.secret_der().to_vec(),
             };
             let buf = encode_message(&welcome, Priority::Critical)?;
             send.write_all(&buf)
