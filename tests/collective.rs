@@ -117,6 +117,69 @@ async fn test_allreduce_uneven_count() {
     .await;
 }
 
+#[tokio::test]
+async fn test_allreduce_min_3_nodes() {
+    run_collective(3, |client| async move {
+        let rank = client.rank();
+        let val = (rank + 1) as f32;
+        let mut data = vec![val; 4];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .all_reduce(ptr, 4, DataType::F32, ReduceOp::Min)
+                .await
+                .unwrap();
+        }
+
+        // Min of 1, 2, 3 = 1
+        assert_eq!(data, vec![1.0f32; 4], "rank {rank} allreduce min failed");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_allreduce_max_3_nodes() {
+    run_collective(3, |client| async move {
+        let rank = client.rank();
+        let val = (rank + 1) as f32;
+        let mut data = vec![val; 4];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .all_reduce(ptr, 4, DataType::F32, ReduceOp::Max)
+                .await
+                .unwrap();
+        }
+
+        // Max of 1, 2, 3 = 3
+        assert_eq!(data, vec![3.0f32; 4], "rank {rank} allreduce max failed");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_allreduce_prod_2_nodes() {
+    run_collective(2, |client| async move {
+        let rank = client.rank();
+        let val = (rank + 2) as f32; // rank 0 → 2.0, rank 1 → 3.0
+        let mut data = vec![val; 4];
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .all_reduce(ptr, 4, DataType::F32, ReduceOp::Prod)
+                .await
+                .unwrap();
+        }
+
+        // Product of 2.0 * 3.0 = 6.0
+        assert_eq!(data, vec![6.0f32; 4], "rank {rank} allreduce prod failed");
+    })
+    .await;
+}
+
 // ============================================================================
 // Broadcast tests
 // ============================================================================
@@ -141,6 +204,48 @@ async fn test_broadcast_from_root_0() {
             vec![42.0, 43.0, 44.0, 45.0],
             "rank {rank} broadcast failed"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_broadcast_from_nonzero_root() {
+    run_collective(3, |client| async move {
+        let rank = client.rank();
+        let root = 2;
+        let mut data: Vec<f32> = if rank == root {
+            vec![99.0, 100.0, 101.0]
+        } else {
+            vec![0.0; 3]
+        };
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client.broadcast(ptr, 3, DataType::F32, root).await.unwrap();
+        }
+
+        assert_eq!(
+            data,
+            vec![99.0, 100.0, 101.0],
+            "rank {rank} broadcast from root {root} failed"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_broadcast_5_nodes_tree() {
+    // 5 nodes triggers tree broadcast (threshold is 4).
+    run_collective(5, |client| async move {
+        let rank = client.rank();
+        let mut data: Vec<i32> = if rank == 0 { vec![7, 8, 9] } else { vec![0; 3] };
+        let ptr = data.as_mut_ptr() as u64;
+
+        unsafe {
+            client.broadcast(ptr, 3, DataType::I32, 0).await.unwrap();
+        }
+
+        assert_eq!(data, vec![7, 8, 9], "rank {rank} tree broadcast failed");
     })
     .await;
 }
@@ -176,6 +281,29 @@ async fn test_allgather_3_nodes() {
     .await;
 }
 
+#[tokio::test]
+async fn test_allgather_4_nodes() {
+    run_collective(4, |client| async move {
+        let rank = client.rank();
+        let send_data: Vec<i32> = vec![(rank as i32) * 10; 3];
+        let mut recv_data: Vec<i32> = vec![0; 12]; // 3 * 4 = 12
+
+        let send_ptr = send_data.as_ptr() as u64;
+        let recv_ptr = recv_data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .all_gather(send_ptr, recv_ptr, 3, DataType::I32)
+                .await
+                .unwrap();
+        }
+
+        let expected = vec![0, 0, 0, 10, 10, 10, 20, 20, 20, 30, 30, 30];
+        assert_eq!(recv_data, expected, "rank {rank} allgather 4-node failed");
+    })
+    .await;
+}
+
 // ============================================================================
 // ReduceScatter tests
 // ============================================================================
@@ -207,6 +335,34 @@ async fn test_reduce_scatter_2_nodes() {
     .await;
 }
 
+#[tokio::test]
+async fn test_reduce_scatter_3_nodes() {
+    run_collective(3, |client| async move {
+        let rank = client.rank();
+        // Each rank contributes 6 elements (2 per chunk × 3 ranks).
+        let send_data: Vec<f32> = vec![(rank + 1) as f32; 6];
+        let mut recv_data: Vec<f32> = vec![0.0; 2];
+
+        let send_ptr = send_data.as_ptr() as u64;
+        let recv_ptr = recv_data.as_mut_ptr() as u64;
+
+        unsafe {
+            client
+                .reduce_scatter(send_ptr, recv_ptr, 2, DataType::F32, ReduceOp::Sum)
+                .await
+                .unwrap();
+        }
+
+        // Each chunk: sum of 1+2+3 = 6
+        assert_eq!(
+            recv_data,
+            vec![6.0, 6.0],
+            "rank {rank} reduce_scatter 3-node failed"
+        );
+    })
+    .await;
+}
+
 // ============================================================================
 // Barrier tests
 // ============================================================================
@@ -214,6 +370,15 @@ async fn test_reduce_scatter_2_nodes() {
 #[tokio::test]
 async fn test_barrier_4_nodes() {
     run_collective(4, |client| async move {
+        client.barrier().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_barrier_5_nodes_dissemination() {
+    // 5 nodes triggers dissemination barrier (threshold is 5).
+    run_collective(5, |client| async move {
         client.barrier().await.unwrap();
     })
     .await;

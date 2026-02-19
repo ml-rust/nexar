@@ -22,7 +22,7 @@ impl NexarClient {
         world_size: u32,
         adapter: Arc<dyn DeviceAdapter>,
     ) -> Result<Vec<NexarClient>> {
-        let seed_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let seed_addr: SocketAddr = "127.0.0.1:0".parse().expect("hardcoded socket addr");
         let seed = SeedNode::bind(seed_addr, world_size)?;
         let seed_addr = seed.local_addr();
 
@@ -63,7 +63,10 @@ async fn build_mesh(
     let n = workers.len();
     if n == 1 {
         // Single-node: no peers needed.
-        let w = workers.into_iter().next().unwrap();
+        let w = workers
+            .into_iter()
+            .next()
+            .expect("workers vec confirmed non-empty by n==1 check");
         return Ok(vec![NexarClient::new(
             w.rank,
             w.world_size,
@@ -84,7 +87,7 @@ async fn build_mesh(
         let key = rustls::pki_types::PrivateKeyDer::try_from(w.node_key.clone())
             .map_err(|e| NexarError::Tls(format!("parse node key for rank {}: {e}", w.rank)))?;
         let listener = crate::transport::TransportListener::bind_with_mtls(
-            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().expect("hardcoded socket addr"),
             cert,
             key,
             &ca_cert_der,
@@ -115,8 +118,9 @@ async fn build_mesh(
             let addr_j = listen_addrs[j];
 
             // Worker i connects to worker j using i's mTLS client config.
-            let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
-                .map_err(|e| NexarError::Transport(format!("mesh client: {e}")))?;
+            let mut endpoint =
+                quinn::Endpoint::client("0.0.0.0:0".parse().expect("hardcoded socket addr"))
+                    .map_err(|e| NexarError::Transport(format!("mesh client: {e}")))?;
             endpoint.set_default_client_config(client_configs[i].clone());
 
             let accept_fut = listeners[j].accept();
