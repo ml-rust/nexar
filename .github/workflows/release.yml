@@ -77,16 +77,16 @@ jobs:
           VERSION="${{ needs.validate-version.outputs.version }}"
           CURRENT=$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "nexar") | .version')
           if [[ "$VERSION" != "$CURRENT" ]]; then
-            sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
-            echo "Updated Cargo.toml: $CURRENT -> $VERSION"
+            sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" nexar/Cargo.toml
+            echo "Updated nexar/Cargo.toml: $CURRENT -> $VERSION"
           else
             echo "Version already matches, no change needed"
           fi
 
       - name: Dry run
-        run: cargo publish --dry-run --allow-dirty
+        run: cargo publish -p nexar --dry-run --allow-dirty
 
-      - name: Publish to crates.io
-        run: cargo publish --allow-dirty
+      - name: Publish nexar to crates.io
+        run: cargo publish -p nexar --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
