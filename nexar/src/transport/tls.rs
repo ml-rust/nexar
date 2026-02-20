@@ -269,6 +269,86 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     }
 }
 
+/// Build a raw `rustls::ServerConfig` for the TCP bulk sidecar with mutual TLS.
+///
+/// Unlike [`make_server_config_mtls`] which wraps into a QUIC config, this
+/// returns a plain rustls config suitable for wrapping TCP streams via
+/// `tokio-rustls`. Uses ALPN `nexar-bulk/1` to distinguish from QUIC traffic.
+pub fn make_bulk_tls_server_config(
+    cert: rustls::pki_types::CertificateDer<'static>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+    ca_cert: &rustls::pki_types::CertificateDer<'static>,
+) -> Result<Arc<rustls::ServerConfig>> {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(ca_cert.clone())
+        .map_err(|e| NexarError::Tls(format!("bulk TLS: add CA to root store: {e}")))?;
+
+    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| NexarError::Tls(format!("bulk TLS: build client verifier: {e}")))?;
+
+    let mut tls_config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(client_verifier)
+        .with_single_cert(vec![cert], key)
+        .map_err(|e| NexarError::Tls(format!("bulk TLS server config: {e}")))?;
+
+    tls_config.alpn_protocols = vec![b"nexar-bulk/1".to_vec()];
+    Ok(Arc::new(tls_config))
+}
+
+/// Build a raw `rustls::ClientConfig` for the TCP bulk sidecar with mutual TLS.
+///
+/// Returns a plain rustls config suitable for wrapping TCP streams via
+/// `tokio-rustls`. Uses ALPN `nexar-bulk/1`.
+pub fn make_bulk_tls_client_config(
+    cert: rustls::pki_types::CertificateDer<'static>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+    ca_cert: &rustls::pki_types::CertificateDer<'static>,
+) -> Result<Arc<rustls::ClientConfig>> {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(ca_cert.clone())
+        .map_err(|e| NexarError::Tls(format!("bulk TLS: add CA to root store: {e}")))?;
+
+    let mut tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_client_auth_cert(vec![cert], key)
+        .map_err(|e| NexarError::Tls(format!("bulk TLS client config: {e}")))?;
+
+    tls_config.alpn_protocols = vec![b"nexar-bulk/1".to_vec()];
+    Ok(Arc::new(tls_config))
+}
+
+/// Build a `rustls::ServerConfig` that skips client auth for the TCP bulk sidecar.
+///
+/// Used in `bootstrap_local` where all nodes share self-signed certs.
+/// Provides encryption without authentication (same trust boundary as QUIC bootstrap).
+pub(crate) fn make_bulk_tls_server_config_insecure() -> Result<Arc<rustls::ServerConfig>> {
+    let (cert, key) = generate_self_signed_cert()?;
+
+    let mut tls_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert], key)
+        .map_err(|e| NexarError::Tls(format!("bulk TLS insecure server: {e}")))?;
+
+    tls_config.alpn_protocols = vec![b"nexar-bulk/1".to_vec()];
+    Ok(Arc::new(tls_config))
+}
+
+/// Build a `rustls::ClientConfig` that skips server verification for the TCP bulk sidecar.
+///
+/// Used in `bootstrap_local` where all nodes share self-signed certs.
+pub(crate) fn make_bulk_tls_client_config_insecure() -> Result<Arc<rustls::ClientConfig>> {
+    let mut tls_config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+        .with_no_client_auth();
+
+    tls_config.alpn_protocols = vec![b"nexar-bulk/1".to_vec()];
+    Ok(Arc::new(tls_config))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

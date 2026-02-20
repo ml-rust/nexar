@@ -3,7 +3,7 @@ use crate::transport::BulkTransport;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 
@@ -19,13 +19,16 @@ struct RecvState {
     pending: HashMap<u64, Vec<Vec<u8>>>,
 }
 
-/// Bulk transport over raw TCP (no TLS).
+/// Bulk transport over TCP, optionally wrapped in TLS.
 ///
 /// Carries a `[tag: u64 LE][len: u64 LE][payload]` framing so that tagged
 /// collectives can bypass QUIC's AES-256-GCM overhead for large tensor data.
 /// Tag 0 is used for untagged `send_bulk`/`recv_bulk`.
+///
+/// When `NexarConfig::encrypt_bulk_transport` is `true` (the default), the
+/// underlying TCP stream is wrapped in TLS before framing is applied.
 pub struct TcpBulkTransport {
-    writer: Mutex<tokio::io::WriteHalf<TcpStream>>,
+    writer: Mutex<Box<dyn AsyncWrite + Unpin + Send>>,
     /// Default (tag=0) receive channel.
     untagged_rx: Mutex<mpsc::Receiver<Vec<u8>>>,
     /// Shared state with the recv loop (senders + pending buffer).
@@ -55,10 +58,19 @@ pub trait TaggedBulkTransport: BulkTransport {
 }
 
 impl TcpBulkTransport {
-    /// Create a `TcpBulkTransport` from an already-connected `TcpStream`.
+    /// Create a `TcpBulkTransport` from an already-connected `TcpStream` (plaintext).
     pub fn from_stream(stream: TcpStream) -> Self {
         let (reader, writer) = tokio::io::split(stream);
+        Self::from_split(Box::new(reader), Box::new(writer))
+    }
 
+    /// Create a `TcpBulkTransport` from any async read/write pair.
+    ///
+    /// This is the generic constructor used by both plaintext and TLS paths.
+    pub fn from_split(
+        reader: Box<dyn AsyncRead + Unpin + Send>,
+        writer: Box<dyn AsyncWrite + Unpin + Send>,
+    ) -> Self {
         let (untagged_tx, untagged_rx) = mpsc::channel(64);
         let state = Arc::new(Mutex::new(RecvState {
             senders: HashMap::new(),
@@ -176,7 +188,7 @@ const MAX_TCP_FRAME_SIZE: usize = 4 * 1024 * 1024 * 1024;
 
 /// Background loop: read frames and route to the appropriate channel.
 async fn recv_loop(
-    mut reader: tokio::io::ReadHalf<TcpStream>,
+    mut reader: Box<dyn AsyncRead + Unpin + Send>,
     untagged_tx: mpsc::Sender<Vec<u8>>,
     state: Arc<Mutex<RecvState>>,
 ) {
@@ -262,4 +274,57 @@ pub async fn tcp_bulk_accept(listener: &TcpListener) -> Result<TcpBulkTransport>
         .set_nodelay(true)
         .map_err(|e| NexarError::transport_with_source("tcp bulk set_nodelay", e))?;
     Ok(TcpBulkTransport::from_stream(stream))
+}
+
+/// Connect to a peer's TCP bulk listener with TLS and create the transport.
+pub async fn tcp_bulk_connect_tls(
+    addr: std::net::SocketAddr,
+    tls_config: Arc<rustls::ClientConfig>,
+) -> Result<TcpBulkTransport> {
+    let stream = TcpStream::connect(addr)
+        .await
+        .map_err(|e| NexarError::transport_with_source("tcp bulk tls connect", e))?;
+    stream
+        .set_nodelay(true)
+        .map_err(|e| NexarError::transport_with_source("tcp bulk tls set_nodelay", e))?;
+
+    let connector = tokio_rustls::TlsConnector::from(tls_config);
+    let server_name = rustls::pki_types::ServerName::try_from("localhost")
+        .map_err(|e| NexarError::Tls(format!("bulk TLS server name: {e}")))?;
+    let tls_stream = connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| NexarError::transport_with_source("tcp bulk tls handshake (client)", e))?;
+
+    let (reader, writer) = tokio::io::split(tls_stream);
+    Ok(TcpBulkTransport::from_split(
+        Box::new(reader),
+        Box::new(writer),
+    ))
+}
+
+/// Accept one TLS connection from a TCP bulk listener.
+pub async fn tcp_bulk_accept_tls(
+    listener: &TcpListener,
+    tls_config: Arc<rustls::ServerConfig>,
+) -> Result<TcpBulkTransport> {
+    let (stream, _addr) = listener
+        .accept()
+        .await
+        .map_err(|e| NexarError::transport_with_source("tcp bulk tls accept", e))?;
+    stream
+        .set_nodelay(true)
+        .map_err(|e| NexarError::transport_with_source("tcp bulk tls set_nodelay", e))?;
+
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+    let tls_stream = acceptor
+        .accept(stream)
+        .await
+        .map_err(|e| NexarError::transport_with_source("tcp bulk tls handshake (server)", e))?;
+
+    let (reader, writer) = tokio::io::split(tls_stream);
+    Ok(TcpBulkTransport::from_split(
+        Box::new(reader),
+        Box::new(writer),
+    ))
 }

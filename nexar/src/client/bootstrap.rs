@@ -192,7 +192,13 @@ async fn build_mesh(
 /// Emits a warning when establishing unencrypted sidecars on non-loopback addresses.
 async fn establish_tcp_sidecars(clients: &[NexarClient]) -> Result<()> {
     use crate::transport::TaggedBulkTransport;
-    use crate::transport::tcp_bulk::{tcp_bulk_accept, tcp_bulk_connect, tcp_bulk_listen};
+    use crate::transport::tcp_bulk::{
+        tcp_bulk_accept, tcp_bulk_accept_tls, tcp_bulk_connect, tcp_bulk_connect_tls,
+        tcp_bulk_listen,
+    };
+    use crate::transport::tls::{
+        make_bulk_tls_client_config_insecure, make_bulk_tls_server_config_insecure,
+    };
 
     let n = clients.len();
     if n <= 1 {
@@ -206,13 +212,27 @@ async fn establish_tcp_sidecars(clients: &[NexarClient]) -> Result<()> {
         return Ok(());
     }
 
-    if !config.encrypt_bulk_transport {
+    let encrypt = config.encrypt_bulk_transport;
+    if !encrypt {
         tracing::warn!(
             "TCP bulk sidecar is UNENCRYPTED. Tensor data will be sent in plaintext. \
              Set NEXAR_ENCRYPT_BULK_TRANSPORT=true or config.encrypt_bulk_transport=true \
              to enable TLS on the bulk transport."
         );
     }
+
+    // Build TLS configs once if encryption is enabled.
+    // Uses self-signed + skip-verify for bootstrap_local (encryption without authentication).
+    let tls_server = if encrypt {
+        Some(make_bulk_tls_server_config_insecure()?)
+    } else {
+        None
+    };
+    let tls_client = if encrypt {
+        Some(make_bulk_tls_client_config_insecure()?)
+    } else {
+        None
+    };
 
     // For each pair (i, j) with i < j: i listens, j connects.
     for i in 0..n {
@@ -227,7 +247,14 @@ async fn establish_tcp_sidecars(clients: &[NexarClient]) -> Result<()> {
             let (listener, addr) = tcp_bulk_listen(bind_addr).await?;
 
             let (transport_i, transport_j) =
-                tokio::try_join!(tcp_bulk_accept(&listener), tcp_bulk_connect(addr),)?;
+                if let (Some(sc), Some(cc)) = (&tls_server, &tls_client) {
+                    tokio::try_join!(
+                        tcp_bulk_accept_tls(&listener, Arc::clone(sc)),
+                        tcp_bulk_connect_tls(addr, Arc::clone(cc)),
+                    )?
+                } else {
+                    tokio::try_join!(tcp_bulk_accept(&listener), tcp_bulk_connect(addr),)?
+                };
 
             // Attach as TaggedBulkTransport to the peer connections.
             let peer_ij = clients[i].peer(rank_j)?;

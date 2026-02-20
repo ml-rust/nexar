@@ -4,7 +4,7 @@ mod listener;
 pub mod router;
 pub(crate) mod stream_pool;
 pub mod tcp_bulk;
-pub(crate) mod tls;
+pub mod tls;
 
 pub use connection::{BulkTransport, PeerConnection};
 pub use listener::TransportListener;
