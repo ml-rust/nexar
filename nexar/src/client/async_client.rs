@@ -338,9 +338,12 @@ impl NexarClient {
         }
     }
 
-    /// Send raw bytes to a peer (used by collective algorithms).
-    /// Uses comm-aware send for split communicators.
-    pub(crate) async fn send_bytes(&self, dest: Rank, data: &[u8]) -> Result<()> {
+    /// Send raw bytes to a peer.
+    ///
+    /// Uses comm-aware send for split communicators. Always uses QUIC transport.
+    /// For bulk data in collectives, prefer `send_bytes_best_effort` which
+    /// auto-selects RDMA when available.
+    pub async fn send_bytes(&self, dest: Rank, data: &[u8]) -> Result<()> {
         let peer = self.peer(dest)?;
         if self.comm_id == 0 {
             peer.send_raw(data).await
@@ -349,9 +352,22 @@ impl NexarClient {
         }
     }
 
-    /// Receive raw bytes from a peer (used by collective algorithms).
+    /// Send raw bytes using the best available transport (RDMA if available, QUIC fallback).
+    /// For split communicators, always uses QUIC (comm-id routing required).
+    pub(crate) async fn send_bytes_best_effort(&self, dest: Rank, data: &[u8]) -> Result<()> {
+        let peer = self.peer(dest)?;
+        if self.comm_id == 0 {
+            peer.send_raw_best_effort(data).await
+        } else {
+            // Split communicators need comm_id tagging, QUIC only.
+            peer.send_raw_comm(self.comm_id, data).await
+        }
+    }
+
+    /// Receive raw bytes from a peer.
+    ///
     /// Uses comm-aware recv for split communicators.
-    pub(crate) async fn recv_bytes(&self, src: Rank) -> Result<PooledBuf> {
+    pub async fn recv_bytes(&self, src: Rank) -> Result<PooledBuf> {
         match &self.raw_recv {
             RawRecvSource::Router => {
                 let original_src = self.resolve_rank(src);

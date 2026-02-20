@@ -17,13 +17,20 @@ pub(crate) fn ceil_log2(n: u32) -> u32 {
 pub(crate) const COLLECTIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Send bytes to a peer with timeout, wrapping errors as `CollectiveFailed`.
+///
+/// Uses the best available transport (RDMA if attached, QUIC fallback).
 pub(crate) async fn collective_send(
     client: &NexarClient,
     dest: Rank,
     data: &[u8],
     operation: &'static str,
 ) -> Result<()> {
-    match tokio::time::timeout(COLLECTIVE_TIMEOUT, client.send_bytes(dest, data)).await {
+    match tokio::time::timeout(
+        COLLECTIVE_TIMEOUT,
+        client.send_bytes_best_effort(dest, data),
+    )
+    .await
+    {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(NexarError::CollectiveFailed {
             operation,

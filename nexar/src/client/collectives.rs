@@ -1,3 +1,4 @@
+use crate::compression::Compressor;
 use crate::error::Result;
 use crate::types::Rank;
 
@@ -165,5 +166,31 @@ impl NexarClient {
     /// two-phase for small clusters, dissemination for larger ones.
     pub async fn barrier(&self) -> Result<()> {
         crate::collective::barrier(self, std::time::Duration::from_secs(30)).await
+    }
+
+    /// Compressed allreduce: bandwidth-efficient allreduce with gradient compression.
+    ///
+    /// Uses the provided `Compressor` to sparsify data before sending.
+    /// Error feedback is accumulated in `residual` for unbiased convergence.
+    ///
+    /// # Safety
+    /// - `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+    /// - `residual` must be at least `count * dtype.size_in_bytes()` bytes,
+    ///   zero-initialized on the first call, and preserved across calls.
+    pub async unsafe fn all_reduce_compressed(
+        &self,
+        ptr: u64,
+        count: usize,
+        dtype: crate::types::DataType,
+        op: crate::types::ReduceOp,
+        compressor: &dyn Compressor,
+        residual: &mut [u8],
+    ) -> Result<()> {
+        unsafe {
+            crate::collective::ring_allreduce_compressed(
+                self, ptr, count, dtype, op, compressor, residual,
+            )
+            .await
+        }
     }
 }

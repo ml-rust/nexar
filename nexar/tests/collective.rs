@@ -4,6 +4,7 @@ mod collective {
     mod allreduce;
     mod barrier;
     mod broadcast;
+    mod compressed;
     mod exchange;
     mod reduce;
     mod rpc;

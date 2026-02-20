@@ -1,6 +1,7 @@
 pub mod client;
 pub mod cluster;
 pub mod collective;
+pub mod compression;
 pub mod device;
 pub mod error;
 pub mod memory;
@@ -17,5 +18,5 @@ pub use error::{NexarError, Result};
 pub use memory::GlobalPtr;
 pub use protocol::NexarMessage;
 pub use transport::buffer_pool::PoolProfile;
-pub use transport::{PeerConnection, TransportListener};
+pub use transport::{BulkTransport, PeerConnection, TransportListener};
 pub use types::{DataType, NodeId, Priority, Rank, ReduceOp};

@@ -11,7 +11,7 @@ mod scan;
 mod scatter;
 
 pub use allgather::ring_allgather;
-pub use allreduce::ring_allreduce;
+pub use allreduce::{ring_allreduce, ring_allreduce_compressed};
 pub use alltoall::alltoall;
 pub use barrier::barrier;
 pub use broadcast::tree_broadcast;
