@@ -1,19 +1,11 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{collective_recv, collective_send};
+use crate::collective::helpers::{
+    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
+};
 use crate::error::{NexarError, Result};
 use crate::types::DataType;
 
 /// All-to-all: each rank sends a distinct chunk to every other rank.
-///
-/// Pairwise exchange algorithm: in round `r`, rank communicates with
-/// `(rank + r) % world`. This avoids contention since no two pairs
-/// overlap in any round.
-///
-/// Input layout at `send_ptr`: `world_size` consecutive chunks, each of
-/// `count` elements. Chunk `i` is destined for rank `i`.
-///
-/// Output layout at `recv_ptr`: `world_size` consecutive chunks, each of
-/// `count` elements. Chunk `i` was received from rank `i`.
 ///
 /// # Safety
 /// - `send_ptr` must point to at least `count * world_size * dtype.size_in_bytes()` bytes.
@@ -25,17 +17,28 @@ pub async unsafe fn alltoall(
     count: usize,
     dtype: DataType,
 ) -> Result<()> {
+    unsafe { alltoall_with_tag(client, send_ptr, recv_ptr, count, dtype, None).await }
+}
+
+/// Tagged variant for non-blocking collectives.
+pub(crate) async unsafe fn alltoall_with_tag(
+    client: &NexarClient,
+    send_ptr: u64,
+    recv_ptr: u64,
+    count: usize,
+    dtype: DataType,
+    tag: CollectiveTag,
+) -> Result<()> {
     let world = client.world_size() as usize;
     let rank = client.rank() as usize;
     let elem_size = dtype.size_in_bytes();
     let chunk_bytes = count * elem_size;
     let total_bytes = chunk_bytes * world;
 
-    // Stage entire send buffer.
     let send_buf = unsafe { client.adapter().stage_for_send(send_ptr, total_bytes)? };
     let mut recv_buf = vec![0u8; total_bytes];
 
-    // Round 0: local copy (chunk destined for self).
+    // Round 0: local copy.
     let self_off = rank * chunk_bytes;
     recv_buf[self_off..self_off + chunk_bytes]
         .copy_from_slice(&send_buf[self_off..self_off + chunk_bytes]);
@@ -49,8 +52,8 @@ pub async unsafe fn alltoall(
         let send_data = &send_buf[send_off..send_off + chunk_bytes];
 
         let (send_result, recv_result) = tokio::join!(
-            collective_send(client, send_to as u32, send_data, "alltoall"),
-            collective_recv(client, recv_from as u32, "alltoall"),
+            collective_send_with_tag(client, send_to as u32, send_data, "alltoall", tag),
+            collective_recv_with_tag(client, recv_from as u32, "alltoall", tag),
         );
         send_result?;
         let received = recv_result?;

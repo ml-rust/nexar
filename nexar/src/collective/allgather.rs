@@ -1,5 +1,7 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{collective_recv, collective_send};
+use crate::collective::helpers::{
+    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
+};
 use crate::error::{NexarError, Result};
 use crate::types::DataType;
 
@@ -15,6 +17,18 @@ pub async unsafe fn ring_allgather(
     recv_ptr: u64,
     count: usize,
     dtype: DataType,
+) -> Result<()> {
+    unsafe { ring_allgather_with_tag(client, send_ptr, recv_ptr, count, dtype, None).await }
+}
+
+/// Tagged variant for non-blocking collectives.
+pub(crate) async unsafe fn ring_allgather_with_tag(
+    client: &NexarClient,
+    send_ptr: u64,
+    recv_ptr: u64,
+    count: usize,
+    dtype: DataType,
+    tag: CollectiveTag,
 ) -> Result<()> {
     let world = client.world_size() as usize;
     let rank = client.rank() as usize;
@@ -47,8 +61,8 @@ pub async unsafe fn ring_allgather(
         let send_data = buf[send_idx * chunk_bytes..(send_idx + 1) * chunk_bytes].to_vec();
 
         let (send_result, recv_result) = tokio::join!(
-            collective_send(client, next as u32, &send_data, "allgather"),
-            collective_recv(client, prev as u32, "allgather"),
+            collective_send_with_tag(client, next as u32, &send_data, "allgather", tag),
+            collective_recv_with_tag(client, prev as u32, "allgather", tag),
         );
         send_result?;
         let received = recv_result?;
