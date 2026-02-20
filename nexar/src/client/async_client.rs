@@ -548,11 +548,21 @@ impl NexarClient {
                 .extension::<std::sync::Arc<dyn crate::transport::BulkTransport>>()?
                 .map(|b| std::sync::Arc::clone(&*b));
             if let Some(bulk) = bulk {
-                if let Ok(data) = bulk.recv_bulk(expected_size).await {
-                    return Ok(PooledBuf::from_vec(
-                        data,
-                        std::sync::Arc::clone(&self._pool),
-                    ));
+                match bulk.recv_bulk(expected_size).await {
+                    Ok(data) => {
+                        return Ok(PooledBuf::from_vec(
+                            data,
+                            std::sync::Arc::clone(&self._pool),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            src,
+                            expected_size,
+                            error = %e,
+                            "bulk transport recv failed, falling back to QUIC"
+                        );
+                    }
                 }
             }
         }
