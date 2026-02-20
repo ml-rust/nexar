@@ -1,17 +1,17 @@
 [package]
 name = "nexar-nccl"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "NCCL integration for nexar — hierarchical communicator combining NCCL intra-node with nexar inter-node"
-license = "Apache-2.0"
-repository = "https://github.com/ml-rust/nexar"
+license.workspace = true
+repository.workspace = true
 keywords = ["nccl", "gpu", "distributed", "allreduce", "hpc"]
 readme = "README.md"
 categories = ["network-programming"]
 
 [dependencies]
-nexar = { path = "../nexar" }
+nexar = { version = "0.1.0", path = "../nexar" }
 cudarc = { workspace = true, features = ["nccl"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }

@@ -1,17 +1,17 @@
 [package]
 name = "nexar-rdma"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "RDMA and GPUDirect transport extensions for nexar"
-license = "Apache-2.0"
-repository = "https://github.com/ml-rust/nexar"
+license.workspace = true
+repository.workspace = true
 keywords = ["rdma", "infiniband", "gpudirect", "distributed", "hpc"]
 readme = "README.md"
 categories = ["network-programming"]
 
 [dependencies]
-nexar = { path = "../nexar" }
+nexar = { version = "0.1.0", path = "../nexar" }
 ibverbs-sys = { version = "0.3" }
 libc = "0.2"
 crossbeam-queue = { workspace = true }
