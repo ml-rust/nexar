@@ -49,6 +49,38 @@ impl NexarClient {
 
         build_mesh(workers, adapter).await
     }
+
+    /// Like [`bootstrap_local`], but with a custom configuration.
+    pub async fn bootstrap_local_with_config(
+        world_size: u32,
+        adapter: Arc<dyn DeviceAdapter>,
+        config: crate::config::NexarConfig,
+    ) -> Result<Vec<NexarClient>> {
+        let seed_addr: SocketAddr = "127.0.0.1:0".parse().expect("hardcoded socket addr");
+        let seed = SeedNode::bind_local(seed_addr, world_size)?;
+        let seed_addr = seed.local_addr();
+
+        let seed_handle = tokio::spawn(async move { seed.form_cluster().await });
+
+        let mut worker_handles = Vec::new();
+        for _ in 0..world_size {
+            worker_handles.push(tokio::spawn(WorkerNode::connect(seed_addr)));
+        }
+
+        let (_map, _seed_conns) = seed_handle
+            .await
+            .map_err(|e| NexarError::transport_with_source("seed task panicked", e))??;
+
+        let mut workers: Vec<WorkerNode> = Vec::new();
+        for h in worker_handles {
+            workers.push(
+                h.await
+                    .map_err(|e| NexarError::transport_with_source("worker task panicked", e))??,
+            );
+        }
+
+        build_mesh_with_config(workers, adapter, config).await
+    }
 }
 
 /// Establish a full mesh of P2P connections between workers using mutual TLS.
@@ -176,6 +208,124 @@ async fn build_mesh(
     clients.sort_by_key(|c| c.rank());
 
     // Establish TCP bulk sidecar connections between each peer pair.
+    establish_tcp_sidecars(&clients).await?;
+
+    Ok(clients)
+}
+
+/// Like [`build_mesh`], but with a custom configuration for each client.
+async fn build_mesh_with_config(
+    workers: Vec<WorkerNode>,
+    adapter: Arc<dyn DeviceAdapter>,
+    config: crate::config::NexarConfig,
+) -> Result<Vec<NexarClient>> {
+    let n = workers.len();
+    if n == 1 {
+        let w = workers
+            .into_iter()
+            .next()
+            .expect("workers vec confirmed non-empty by n==1 check");
+        return Ok(vec![NexarClient::new_with_config(
+            w.rank,
+            w.world_size,
+            HashMap::new(),
+            adapter,
+            crate::transport::buffer_pool::PoolProfile::Training,
+            config,
+        )]);
+    }
+
+    let ca_cert_der = rustls::pki_types::CertificateDer::from(workers[0].ca_cert.clone());
+
+    let mut listeners = Vec::new();
+    let mut listen_addrs = Vec::new();
+    for w in &workers {
+        let cert = rustls::pki_types::CertificateDer::from(w.node_cert.clone());
+        let key = rustls::pki_types::PrivateKeyDer::try_from(w.node_key.clone())
+            .map_err(|e| NexarError::Tls(format!("parse node key for rank {}: {e}", w.rank)))?;
+        let listener = crate::transport::TransportListener::bind_with_mtls(
+            "127.0.0.1:0".parse().expect("hardcoded socket addr"),
+            cert,
+            key,
+            &ca_cert_der,
+        )?;
+        listen_addrs.push(listener.local_addr());
+        listeners.push(listener);
+    }
+
+    let mut client_configs = Vec::new();
+    for w in &workers {
+        let cert = rustls::pki_types::CertificateDer::from(w.node_cert.clone());
+        let key = rustls::pki_types::PrivateKeyDer::try_from(w.node_key.clone())
+            .map_err(|e| NexarError::Tls(format!("parse node key for rank {}: {e}", w.rank)))?;
+        client_configs.push(make_client_config_mtls(cert, key, &ca_cert_der)?);
+    }
+
+    let listeners: Vec<Arc<crate::transport::TransportListener>> =
+        listeners.into_iter().map(Arc::new).collect();
+
+    let mut pair_futures = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let rank_i = workers[i].rank;
+            let rank_j = workers[j].rank;
+            let addr_j = listen_addrs[j];
+            let config_i = client_configs[i].clone();
+            let listener_j = Arc::clone(&listeners[j]);
+
+            pair_futures.push(tokio::spawn(async move {
+                let mut endpoint =
+                    quinn::Endpoint::client("0.0.0.0:0".parse().expect("hardcoded socket addr"))
+                        .map_err(|e| NexarError::transport_with_source("mesh client", e))?;
+                endpoint.set_default_client_config(config_i);
+
+                let accept_fut = listener_j.accept();
+                let connect_fut = endpoint.connect(addr_j, "localhost");
+
+                let connect_connecting = connect_fut
+                    .map_err(|e| NexarError::transport_with_source("mesh connect", e))?;
+
+                let (accepted, connected) = tokio::try_join!(accept_fut, async {
+                    connect_connecting
+                        .await
+                        .map_err(|e| NexarError::transport_with_source("mesh handshake", e))
+                })?;
+
+                let conn_ij = PeerConnection::new(rank_j, connected);
+                let conn_ji = PeerConnection::new(rank_i, accepted);
+
+                tokio::join!(conn_ij.warm_stream_pool(), conn_ji.warm_stream_pool());
+
+                Ok::<_, NexarError>((i, j, rank_i, rank_j, conn_ij, conn_ji))
+            }));
+        }
+    }
+
+    let mut all_peers: Vec<HashMap<Rank, PeerConnection>> =
+        (0..n).map(|_| HashMap::new()).collect();
+
+    for handle in pair_futures {
+        let (i, j, rank_i, rank_j, conn_ij, conn_ji) = handle
+            .await
+            .map_err(|e| NexarError::transport_with_source("mesh task panicked", e))??;
+        all_peers[i].insert(rank_j, conn_ij);
+        all_peers[j].insert(rank_i, conn_ji);
+    }
+
+    let mut clients = Vec::new();
+    for (idx, peers) in all_peers.into_iter().enumerate() {
+        clients.push(NexarClient::new_with_config(
+            workers[idx].rank,
+            workers[idx].world_size,
+            peers,
+            Arc::clone(&adapter),
+            crate::transport::buffer_pool::PoolProfile::Training,
+            config.clone(),
+        ));
+    }
+
+    clients.sort_by_key(|c| c.rank());
+
     establish_tcp_sidecars(&clients).await?;
 
     Ok(clients)

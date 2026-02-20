@@ -26,6 +26,11 @@ impl WorkerNode {
     /// The initial connection uses insecure TLS (bootstrap). After receiving
     /// the Welcome message with CA-signed credentials, all subsequent mesh
     /// connections use mutual TLS.
+    /// Maximum number of connection attempts to the seed node.
+    const MAX_RETRIES: u32 = 5;
+    /// Initial backoff delay between retries (doubles each attempt).
+    const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+
     pub async fn connect(seed_addr: SocketAddr) -> Result<Self> {
         let client_config = make_bootstrap_client_config()?;
 
@@ -35,14 +40,7 @@ impl WorkerNode {
             .map_err(|e| NexarError::transport_with_source("bind client", e))?;
         endpoint.set_default_client_config(client_config);
 
-        let conn = endpoint
-            .connect(seed_addr, "localhost")
-            .map_err(|e| NexarError::transport_with_source("connect to seed", e))?
-            .await
-            .map_err(|e| NexarError::ConnectionFailed {
-                rank: 0,
-                reason: format!("QUIC handshake: {e}"),
-            })?;
+        let conn = Self::connect_with_retry(&endpoint, seed_addr).await?;
 
         // Open the first bidirectional stream and send Hello.
         let (mut send, mut recv) = conn
@@ -102,6 +100,45 @@ impl WorkerNode {
                 "expected Welcome, got {other:?}"
             ))),
         }
+    }
+
+    /// Connect to the seed with exponential backoff retry.
+    async fn connect_with_retry(
+        endpoint: &quinn::Endpoint,
+        seed_addr: SocketAddr,
+    ) -> Result<quinn::Connection> {
+        let mut backoff = Self::INITIAL_BACKOFF;
+        let mut last_err = None;
+
+        for attempt in 0..Self::MAX_RETRIES {
+            match endpoint
+                .connect(seed_addr, "localhost")
+                .map_err(|e| NexarError::transport_with_source("connect to seed", e))?
+                .await
+            {
+                Ok(conn) => return Ok(conn),
+                Err(e) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max = Self::MAX_RETRIES,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "seed connection failed: {e}, retrying"
+                    );
+                    last_err = Some(e);
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                }
+            }
+        }
+
+        Err(NexarError::ConnectionFailed {
+            rank: 0,
+            reason: format!(
+                "failed to connect to seed after {} attempts: {}",
+                Self::MAX_RETRIES,
+                last_err.unwrap()
+            ),
+        })
     }
 }
 

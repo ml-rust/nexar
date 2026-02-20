@@ -568,4 +568,15 @@ impl NexarClient {
     pub(crate) fn next_collective_tag(&self) -> u64 {
         self.collective_tag.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// Close all peer connections immediately.
+    ///
+    /// This sends a QUIC `CONNECTION_CLOSE` frame to every peer, causing
+    /// their in-flight sends/recvs to fail promptly. Useful for graceful
+    /// shutdown and fault-injection testing.
+    pub fn close(&self) {
+        for peer in self.peers.values() {
+            peer.conn.close(0u32.into(), b"closed");
+        }
+    }
 }
