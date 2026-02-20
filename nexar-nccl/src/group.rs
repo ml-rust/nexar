@@ -233,6 +233,57 @@ impl NcclGroup {
         Ok(())
     }
 
+    /// Create a CUDA event (disable timing for lower overhead).
+    pub fn create_event(&self) -> Result<cudarc::driver::sys::CUevent> {
+        cudarc::driver::result::event::create(
+            cudarc::driver::sys::CUevent_flags::CU_EVENT_DISABLE_TIMING,
+        )
+        .map_err(NcclCommError::CudaDriver)
+    }
+
+    /// Record an event on this group's NCCL stream.
+    ///
+    /// # Safety
+    /// The event must have been created by `create_event` and not yet destroyed.
+    pub unsafe fn record_event(&self, event: cudarc::driver::sys::CUevent) -> Result<()> {
+        unsafe {
+            cudarc::driver::result::event::record(event, self.stream.cu_stream())
+                .map_err(NcclCommError::CudaDriver)?;
+        }
+        Ok(())
+    }
+
+    /// Make the given stream wait for an event (GPU-side dependency, no CPU block).
+    ///
+    /// # Safety
+    /// The event and stream must be valid.
+    pub unsafe fn stream_wait_event(
+        &self,
+        stream: &CudaStream,
+        event: cudarc::driver::sys::CUevent,
+    ) -> Result<()> {
+        unsafe {
+            cudarc::driver::result::stream::wait_event(
+                stream.cu_stream(),
+                event,
+                cudarc::driver::sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT,
+            )
+            .map_err(NcclCommError::CudaDriver)?;
+        }
+        Ok(())
+    }
+
+    /// Destroy a CUDA event.
+    ///
+    /// # Safety
+    /// The event must have been created by `create_event` and not already destroyed.
+    pub unsafe fn destroy_event(&self, event: cudarc::driver::sys::CUevent) -> Result<()> {
+        unsafe {
+            cudarc::driver::result::event::destroy(event).map_err(NcclCommError::CudaDriver)?;
+        }
+        Ok(())
+    }
+
     fn cu_stream(&self) -> sys::cudaStream_t {
         self.stream.cu_stream() as sys::cudaStream_t
     }

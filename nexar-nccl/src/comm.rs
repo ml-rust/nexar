@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use cudarc::driver::CudaStream;
 use nexar::NexarClient;
 use nexar::types::{DataType, Rank, ReduceOp};
 
@@ -23,6 +24,9 @@ pub struct HierarchicalComm {
     nccl: NcclGroup,
     /// Topology information.
     topo: NodeTopology,
+    /// Staging stream for D2H/H2D copies in the overlap path.
+    /// Used by lead ranks to overlap NCCL ops with nexar network transfers.
+    staging_stream: Option<Arc<CudaStream>>,
 }
 
 impl HierarchicalComm {
@@ -31,12 +35,14 @@ impl HierarchicalComm {
         inter_node: Option<NexarClient>,
         nccl: NcclGroup,
         topo: NodeTopology,
+        staging_stream: Option<Arc<CudaStream>>,
     ) -> Self {
         Self {
             nexar,
             inter_node,
             nccl,
             topo,
+            staging_stream,
         }
     }
 
@@ -93,6 +99,11 @@ impl HierarchicalComm {
     /// Reference to the topology.
     pub fn topology(&self) -> &NodeTopology {
         &self.topo
+    }
+
+    /// Reference to the staging stream (for compute-communication overlap).
+    pub fn staging_stream(&self) -> Option<&Arc<CudaStream>> {
+        self.staging_stream.as_ref()
     }
 
     /// Synchronize the CUDA stream.

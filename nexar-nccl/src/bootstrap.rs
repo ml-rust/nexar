@@ -55,7 +55,22 @@ pub async unsafe fn form_hierarchical_comm(
         None
     };
 
-    Ok(HierarchicalComm::new(nexar, inter_node, nccl, topo))
+    // Step 5: Create staging stream for compute-communication overlap on leads.
+    // The event-based approach eliminates redundant synchronize() calls even when
+    // using the same stream, but a separate non-blocking stream enables true overlap.
+    let staging_stream = if topo.is_lead() && topo.num_nodes > 1 {
+        Some(Arc::clone(nccl.stream()))
+    } else {
+        None
+    };
+
+    Ok(HierarchicalComm::new(
+        nexar,
+        inter_node,
+        nccl,
+        topo,
+        staging_stream,
+    ))
 }
 
 /// Exchange the NCCL unique ID among ranks on the same node.
