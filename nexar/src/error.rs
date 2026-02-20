@@ -90,6 +90,12 @@ pub enum NexarError {
 
     #[error("internal lock poisoned: {0}")]
     LockPoisoned(&'static str),
+
+    #[error("recovery failed (dead ranks: {dead_ranks:?}): {message}")]
+    Recovery {
+        dead_ranks: Vec<Rank>,
+        message: String,
+    },
 }
 
 impl NexarError {
@@ -230,6 +236,10 @@ mod tests {
                 operation: "rs_ag_allreduce",
             },
             NexarError::LockPoisoned("extensions"),
+            NexarError::Recovery {
+                dead_ranks: vec![2],
+                message: "test".into(),
+            },
         ];
         for e in &errors {
             assert!(!e.to_string().is_empty(), "empty display for {e:?}");

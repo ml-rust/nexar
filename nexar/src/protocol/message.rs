@@ -77,6 +77,12 @@ pub enum NexarMessage {
 
     /// Communicator split request: carries (color, key) for group formation.
     SplitRequest { color: u32, key: u32 },
+
+    /// Recovery vote: a survivor sends its view of dead ranks to the leader.
+    RecoveryVote { epoch: u64, dead_ranks: Vec<Rank> },
+
+    /// Recovery agreement: the leader broadcasts the agreed dead set to all survivors.
+    RecoveryAgreement { epoch: u64, dead_ranks: Vec<Rank> },
 }
 
 #[cfg(test)]
@@ -165,6 +171,14 @@ mod tests {
                 gid: vec![0; 16],
             },
             NexarMessage::SplitRequest { color: 0, key: 1 },
+            NexarMessage::RecoveryVote {
+                epoch: 1,
+                dead_ranks: vec![2, 3],
+            },
+            NexarMessage::RecoveryAgreement {
+                epoch: 1,
+                dead_ranks: vec![2, 3],
+            },
         ];
 
         for msg in messages {

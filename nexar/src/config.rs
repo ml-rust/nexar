@@ -62,6 +62,9 @@ pub struct NexarConfig {
 
     /// Duration after which a peer with no heartbeat response is considered dead.
     pub heartbeat_timeout: Duration,
+
+    /// Timeout for the recovery agreement protocol (vote collection + rebuild).
+    pub recovery_timeout: Duration,
 }
 
 impl Default for NexarConfig {
@@ -78,6 +81,7 @@ impl Default for NexarConfig {
             compressed_allreduce_max_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
             heartbeat_interval: Duration::from_secs(1),
             heartbeat_timeout: Duration::from_secs(5),
+            recovery_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -97,6 +101,7 @@ impl NexarConfig {
     /// - `NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES` (default: 4 GiB, set to "0" to disable)
     /// - `NEXAR_HEARTBEAT_INTERVAL_SECS` (default: 1)
     /// - `NEXAR_HEARTBEAT_TIMEOUT_SECS` (default: 5)
+    /// - `NEXAR_RECOVERY_TIMEOUT_SECS` (default: 30)
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
@@ -151,6 +156,11 @@ impl NexarConfig {
             && let Ok(s) = v.parse::<u64>()
         {
             cfg.heartbeat_timeout = Duration::from_secs(s);
+        }
+        if let Ok(v) = std::env::var("NEXAR_RECOVERY_TIMEOUT_SECS")
+            && let Ok(s) = v.parse::<u64>()
+        {
+            cfg.recovery_timeout = Duration::from_secs(s);
         }
 
         cfg
