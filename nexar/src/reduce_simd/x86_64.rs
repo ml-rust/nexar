@@ -212,10 +212,10 @@ pub(crate) unsafe fn reduce_f16_op_f16c(dst: &mut [u8], src: &[u8], count: usize
     for i in 0..tail {
         let idx = base + i;
         unsafe {
-            let a = crate::reduce::F16(*dp.add(idx)).to_f32();
-            let b = crate::reduce::F16(*sp.add(idx)).to_f32();
+            let a = crate::reduce_types::F16(*dp.add(idx)).to_f32();
+            let b = crate::reduce_types::F16(*sp.add(idx)).to_f32();
             let r = scalar_op_f32(a, b, op);
-            *dp.add(idx) = crate::reduce::F16::from_f32(r).0;
+            *dp.add(idx) = crate::reduce_types::F16::from_f32(r).0;
         }
     }
 }
@@ -348,11 +348,11 @@ mod tests {
 
         let mut dst: Vec<u16> = a_vals
             .iter()
-            .map(|&v| crate::reduce::F16::from_f32(v).0)
+            .map(|&v| crate::reduce_types::F16::from_f32(v).0)
             .collect();
         let src: Vec<u16> = b_vals
             .iter()
-            .map(|&v| crate::reduce::F16::from_f32(v).0)
+            .map(|&v| crate::reduce_types::F16::from_f32(v).0)
             .collect();
 
         let dst_bytes =
@@ -361,7 +361,7 @@ mod tests {
         unsafe { reduce_f16_op_f16c(dst_bytes, src_bytes, count, ReduceOp::Sum) };
 
         for i in 0..count {
-            let got = crate::reduce::F16(dst[i]).to_f32();
+            let got = crate::reduce_types::F16(dst[i]).to_f32();
             let exp = a_vals[i] + b_vals[i];
             assert!(
                 (got - exp).abs() < exp.abs() * 0.01 + 0.1,

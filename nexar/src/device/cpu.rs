@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_reduce_f16_supported() {
-        use crate::reduce::F16;
+        use crate::reduce_types::F16;
         let adapter = CpuAdapter::new();
         let a = [F16::from_f32(1.0), F16::from_f32(2.0)];
         let b = [F16::from_f32(10.0), F16::from_f32(20.0)];
