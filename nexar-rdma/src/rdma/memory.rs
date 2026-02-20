@@ -4,7 +4,8 @@
 //! protection domain. Registration pins memory and is expensive, so we
 //! pre-allocate a pool of registered buffers and reuse them.
 
-use crate::rdma::RdmaContext;
+use super::connection::RdmaContext;
+use super::mr::RdmaMr;
 use crossbeam_queue::ArrayQueue;
 use nexar::error::Result;
 use std::ops::{Deref, DerefMut};
@@ -14,10 +15,9 @@ use std::sync::Arc;
 pub struct RdmaMemoryPool {
     ctx: Arc<RdmaContext>,
     buf_size: usize,
-    queue: ArrayQueue<ibverbs::MemoryRegion<u8>>,
+    queue: ArrayQueue<RdmaMr>,
 }
 
-// Safety: MemoryRegion<u8> is Send+Sync per ibverbs docs, Arc is Send+Sync.
 unsafe impl Send for RdmaMemoryPool {}
 unsafe impl Sync for RdmaMemoryPool {}
 
@@ -50,7 +50,7 @@ impl RdmaMemoryPool {
         })
     }
 
-    fn return_buf(&self, mr: ibverbs::MemoryRegion<u8>) {
+    fn return_buf(&self, mr: RdmaMr) {
         // If full, MR is dropped (deregistered).
         let _ = self.queue.push(mr);
     }
@@ -63,18 +63,18 @@ impl RdmaMemoryPool {
 
 /// A pooled RDMA memory region that auto-returns to the pool on drop.
 pub struct RdmaPooledBuf {
-    mr: Option<ibverbs::MemoryRegion<u8>>,
+    mr: Option<RdmaMr>,
     pool: Arc<RdmaMemoryPool>,
 }
 
 impl RdmaPooledBuf {
-    /// Access the underlying `MemoryRegion` for use with `post_send`/`post_receive`.
-    pub fn mr(&self) -> &ibverbs::MemoryRegion<u8> {
+    /// Access the underlying `RdmaMr` for use with `send`/`recv`.
+    pub fn mr(&self) -> &RdmaMr {
         self.mr.as_ref().expect("MR taken after drop")
     }
 
-    /// Access the underlying `MemoryRegion` mutably.
-    pub fn mr_mut(&mut self) -> &mut ibverbs::MemoryRegion<u8> {
+    /// Access the underlying `RdmaMr` mutably.
+    pub fn mr_mut(&mut self) -> &mut RdmaMr {
         self.mr.as_mut().expect("MR taken after drop")
     }
 }

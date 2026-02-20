@@ -12,16 +12,15 @@ categories = ["network-programming"]
 
 [dependencies]
 nexar = { path = "../nexar" }
-ibverbs = "0.9"
+ibverbs-sys = { version = "0.3" }
 crossbeam-queue = { workspace = true }
 futures = "0.3"
 tokio = { workspace = true }
 tracing = { workspace = true }
 
 # Optional: GPUDirect RDMA (GPU memory → NIC directly)
-ibverbs-sys = { version = "0.3", optional = true }
 cudarc = { workspace = true, optional = true }
 
 [features]
 default = []
-gpudirect = ["dep:ibverbs-sys", "dep:cudarc"]
+gpudirect = ["dep:cudarc"]

@@ -34,7 +34,7 @@ pub mod rdma;
 #[cfg(feature = "gpudirect")]
 pub use cuda_adapter::CudaAdapter;
 pub use ext::PeerConnectionRdmaExt;
-pub use rdma::{RdmaConnection, RdmaContext, RdmaMemoryPool};
+pub use rdma::{RdmaConnection, RdmaContext, RdmaEndpoint, RdmaMemoryPool, RdmaMr};
 
 #[cfg(feature = "gpudirect")]
 pub use client_ext::NexarClientRdmaExt;
