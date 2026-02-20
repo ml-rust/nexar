@@ -143,6 +143,28 @@ impl NexarClient {
         unsafe { self.exclusive_scan(buf.as_u64(), count, dtype, op).await }
     }
 
+    /// Bucketed allreduce on host buffers.
+    ///
+    /// Fuses multiple small host buffers into a single allreduce. Each
+    /// `BufferRef<Host>` must hold exactly `count * dtype.size_in_bytes()`
+    /// bytes for its corresponding element count.
+    ///
+    /// This is host-only by design — no `_device` variant exists because
+    /// the bucketed algorithm operates on host memory. GPU users should
+    /// use `nexar-nccl`'s on-device bucketed operations.
+    pub async fn all_reduce_bucketed_host(
+        &self,
+        entries: &[(BufferRef<Host>, usize)],
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        let raw: Vec<(u64, usize)> = entries
+            .iter()
+            .map(|(b, count)| (b.as_u64(), *count))
+            .collect();
+        unsafe { self.all_reduce_bucketed(&raw, dtype, op).await }
+    }
+
     /// Compressed allreduce on a host buffer.
     pub async fn all_reduce_compressed_host(
         &self,
