@@ -1,17 +1,18 @@
 use crate::client::NexarClient;
 use crate::collective::helpers::{
-    CollectiveTag, collective_recv, collective_recv_with_tag, collective_send,
-    collective_send_with_tag,
+    ChunkLayout, CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
 };
-use crate::compression::{CompressedTensor, Compressor};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
 
-/// AllReduce dispatcher: selects the best algorithm based on world size.
+/// AllReduce dispatcher: selects the best algorithm based on message size
+/// and world size.
 ///
-/// - N <= 4: ring allreduce (lower constant overhead for small groups)
-/// - N > 4: recursive halving-doubling (O(log N) latency steps)
+/// Selection strategy:
+/// - `< 8 KB`:         halving-doubling (latency-optimal, O(log N) steps)
+/// - `8 KB – 8 MiB`:   ring (N ≤ 8) or halving-doubling (N > 8)
+/// - `> 8 MiB`:        pipelined ring (bandwidth-optimal)
 ///
 /// # Safety
 /// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
@@ -25,6 +26,10 @@ pub async unsafe fn ring_allreduce(
     unsafe { ring_allreduce_with_tag(client, ptr, count, dtype, op, None).await }
 }
 
+/// Adaptive algorithm thresholds.
+const LARGE_MSG_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+const RING_MAX_WORLD: usize = 8;
+
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn ring_allreduce_with_tag(
     client: &NexarClient,
@@ -35,21 +40,24 @@ pub(crate) async unsafe fn ring_allreduce_with_tag(
     tag: CollectiveTag,
 ) -> Result<()> {
     let world = client.world_size() as usize;
+    let total_bytes = count * dtype.size_in_bytes();
 
-    if world <= 4 {
-        // Small clusters: ring allreduce, with pipelining for large tensors.
-        let total_bytes = count * dtype.size_in_bytes();
-        if total_bytes >= crate::collective::pipelined_allreduce::PIPELINE_THRESHOLD_BYTES {
-            return unsafe {
-                crate::collective::pipelined_allreduce::pipelined_ring_allreduce(
-                    client, ptr, count, dtype, op, tag,
-                )
-                .await
-            };
+    if total_bytes >= LARGE_MSG_BYTES {
+        // Large messages: pipelined ring is bandwidth-optimal.
+        unsafe {
+            crate::collective::pipelined_allreduce::pipelined_ring_allreduce(
+                client, ptr, count, dtype, op, tag,
+            )
+            .await
         }
+    } else if world <= RING_MAX_WORLD {
+        // Small world: ring has lower constant overhead and handles
+        // non-power-of-2 world sizes without the excess-rank exchange
+        // that halving-doubling requires.
         unsafe { ring_allreduce_impl(client, ptr, count, dtype, op, tag).await }
     } else {
-        // Large clusters: halving-doubling is O(log N) vs ring's O(N).
+        // Large world (N > 8), sub-8MiB message: halving-doubling is
+        // latency-optimal with O(log N) steps vs ring's O(N).
         unsafe { halving_doubling_allreduce(client, ptr, count, dtype, op, tag).await }
     }
 }
@@ -88,24 +96,7 @@ async unsafe fn ring_allreduce_impl(
     let data = unsafe { client.adapter().stage_for_send(ptr, total_bytes)? };
     let mut buf = data;
 
-    let base_chunk = count / world;
-    let remainder = count % world;
-
-    let chunk_count = |i: usize| -> usize {
-        if i < remainder {
-            base_chunk + 1
-        } else {
-            base_chunk
-        }
-    };
-
-    let chunk_offsets: Vec<usize> = (0..world)
-        .scan(0usize, |acc, i| {
-            let off = *acc;
-            *acc += chunk_count(i);
-            Some(off)
-        })
-        .collect();
+    let layout = ChunkLayout::new(count, world);
 
     let next = (rank + 1) % world;
     let prev = (rank + world - 1) % world;
@@ -113,18 +104,20 @@ async unsafe fn ring_allreduce_impl(
     // Phase 1: Scatter-reduce (N-1 rounds).
     for step in 0..(world - 1) {
         let send_idx = (rank + world - step) % world;
-        let send_off = chunk_offsets[send_idx] * elem_size;
-        let send_len = chunk_count(send_idx) * elem_size;
+        let send_off = layout.offsets[send_idx] * elem_size;
+        let send_len = layout.chunk_count(send_idx) * elem_size;
 
         let recv_idx = (rank + world - step - 1) % world;
-        let recv_off = chunk_offsets[recv_idx] * elem_size;
-        let recv_count = chunk_count(recv_idx);
+        let recv_off = layout.offsets[recv_idx] * elem_size;
+        let recv_count = layout.chunk_count(recv_idx);
         let recv_len = recv_count * elem_size;
 
-        let send_data = buf[send_off..send_off + send_len].to_vec();
+        // Zero-copy: extract send slice before the join so recv can borrow buf mutably.
+        // Send and recv operate on different chunks, so this is safe.
+        let send_snapshot = buf[send_off..send_off + send_len].to_vec();
 
         let (send_result, recv_result) = tokio::join!(
-            collective_send_with_tag(client, next as u32, &send_data, "allreduce", tag),
+            collective_send_with_tag(client, next as u32, &send_snapshot, "allreduce", tag),
             collective_recv_with_tag(client, prev as u32, "allreduce", tag),
         );
         send_result?;
@@ -143,17 +136,20 @@ async unsafe fn ring_allreduce_impl(
     // Phase 2: Allgather (N-1 rounds).
     for step in 0..(world - 1) {
         let send_idx = (rank + world + 1 - step) % world;
-        let send_off = chunk_offsets[send_idx] * elem_size;
-        let send_len = chunk_count(send_idx) * elem_size;
+        let send_off = layout.offsets[send_idx] * elem_size;
+        let send_len = layout.chunk_count(send_idx) * elem_size;
 
         let recv_idx = (rank + world - step) % world;
-        let recv_off = chunk_offsets[recv_idx] * elem_size;
-        let recv_len = chunk_count(recv_idx) * elem_size;
+        let recv_off = layout.offsets[recv_idx] * elem_size;
+        let recv_len = layout.chunk_count(recv_idx) * elem_size;
 
-        let send_data = buf[send_off..send_off + send_len].to_vec();
+        // In allgather, send chunk is already fully reduced and won't be
+        // modified by recv. Still need to copy because tokio::join! borrows
+        // the future args, and we can't split borrow buf in safe Rust.
+        let send_snapshot = buf[send_off..send_off + send_len].to_vec();
 
         let (send_result, recv_result) = tokio::join!(
-            collective_send_with_tag(client, next as u32, &send_data, "allreduce", tag),
+            collective_send_with_tag(client, next as u32, &send_snapshot, "allreduce", tag),
             collective_recv_with_tag(client, prev as u32, "allreduce", tag),
         );
         send_result?;
@@ -354,87 +350,6 @@ async unsafe fn halving_doubling_allreduce(
     }
 
     unsafe { client.adapter().receive_to_device(&buf, ptr)? };
-
-    Ok(())
-}
-
-/// Compressed allreduce via allgather-then-reduce.
-///
-/// Each rank compresses its data (with error feedback into `residual`),
-/// broadcasts the compressed representation to all peers, then locally
-/// decompresses and reduces all contributions. This avoids the
-/// accumulation-of-sums problem that a naive ring approach would have
-/// with compression.
-///
-/// # Safety
-/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
-/// `residual` must be valid for at least `count * dtype.size_in_bytes()` bytes.
-pub async unsafe fn ring_allreduce_compressed(
-    client: &NexarClient,
-    ptr: u64,
-    count: usize,
-    dtype: DataType,
-    op: ReduceOp,
-    compressor: &dyn Compressor,
-    residual: &mut [u8],
-) -> Result<()> {
-    let world = client.world_size() as usize;
-
-    if world <= 1 {
-        return Ok(());
-    }
-
-    let elem_size = dtype.size_in_bytes();
-    let total_bytes = count * elem_size;
-
-    let data = unsafe { client.adapter().stage_for_send(ptr, total_bytes)? };
-
-    // Compress local data with error feedback.
-    let compressed = compressor.compress(&data, count, dtype, residual);
-    let my_compressed = compressed.data;
-
-    // Exchange compressed data with all peers using a ring pattern.
-    // Each rank sends its compressed data to the next rank and receives
-    // from the previous, repeated N-1 times so all ranks get all data.
-    let my_rank = client.rank();
-    let next = (my_rank + 1) % client.world_size();
-    let prev = (my_rank + client.world_size() - 1) % client.world_size();
-
-    let mut all_compressed = Vec::with_capacity(world);
-    all_compressed.push(my_compressed.clone());
-
-    // Forward compressed data around the ring: N-1 steps.
-    let mut to_forward = my_compressed;
-    for _step in 0..(world - 1) {
-        let (send_result, recv_result) = tokio::join!(
-            collective_send(client, next, &to_forward, "allreduce_compressed"),
-            collective_recv(client, prev, "allreduce_compressed"),
-        );
-        send_result?;
-        let received = recv_result?;
-        to_forward = received.to_vec();
-        all_compressed.push(to_forward.clone());
-    }
-
-    // Decompress all contributions and reduce locally.
-    let mut result = vec![0u8; total_bytes];
-    for (i, compressed_data) in all_compressed.into_iter().enumerate() {
-        let ct = CompressedTensor {
-            data: compressed_data,
-            original_count: count,
-            dtype,
-        };
-        let mut dense = vec![0u8; total_bytes];
-        compressor.decompress(&ct, &mut dense);
-        if i == 0 {
-            result.copy_from_slice(&dense);
-        } else {
-            reduce_slice(&mut result, &dense, count, dtype, op)?;
-        }
-    }
-
-    // Write the final reduced result back to device.
-    unsafe { client.adapter().receive_to_device(&result, ptr)? };
 
     Ok(())
 }

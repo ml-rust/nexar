@@ -13,6 +13,49 @@ pub(crate) fn ceil_log2(n: u32) -> u32 {
     u32::BITS - (n - 1).leading_zeros()
 }
 
+/// Chunk partition layout for ring-based collectives.
+///
+/// Divides `count` elements among `world` ranks, distributing remainder
+/// elements to the first `remainder` ranks (one extra element each).
+pub(crate) struct ChunkLayout {
+    pub offsets: Vec<usize>,
+    pub base_chunk: usize,
+    pub remainder: usize,
+}
+
+impl ChunkLayout {
+    pub fn new(count: usize, world: usize) -> Self {
+        let base_chunk = count / world;
+        let remainder = count % world;
+
+        let offsets: Vec<usize> = (0..world)
+            .scan(0usize, |acc, i| {
+                let off = *acc;
+                *acc += if i < remainder {
+                    base_chunk + 1
+                } else {
+                    base_chunk
+                };
+                Some(off)
+            })
+            .collect();
+
+        Self {
+            offsets,
+            base_chunk,
+            remainder,
+        }
+    }
+
+    pub fn chunk_count(&self, i: usize) -> usize {
+        if i < self.remainder {
+            self.base_chunk + 1
+        } else {
+            self.base_chunk
+        }
+    }
+}
+
 /// Default timeout for individual send/recv operations within collectives.
 pub(crate) const COLLECTIVE_TIMEOUT: Duration = Duration::from_secs(30);
 

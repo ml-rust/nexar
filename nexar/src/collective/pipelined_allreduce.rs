@@ -6,14 +6,15 @@
 
 use crate::client::NexarClient;
 use crate::collective::helpers::{
-    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
+    ChunkLayout, CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
 };
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
 
-/// Tensors smaller than this use the non-pipelined ring.
-pub(crate) const PIPELINE_THRESHOLD_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+// Note: the dispatch threshold for pipelining is defined in `allreduce.rs`
+// as `LARGE_MSG_BYTES` (8 MiB). This module only contains the pipeline
+// segment size used within the algorithm.
 
 /// Segment size for pipeline stages.
 const PIPELINE_SEGMENT_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
@@ -81,24 +82,7 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
     let data = unsafe { client.adapter().stage_for_send(ptr, total_bytes)? };
     let mut buf = data;
 
-    let base_chunk = count / world;
-    let remainder = count % world;
-
-    let chunk_count = |i: usize| -> usize {
-        if i < remainder {
-            base_chunk + 1
-        } else {
-            base_chunk
-        }
-    };
-
-    let chunk_offsets: Vec<usize> = (0..world)
-        .scan(0usize, |acc, i| {
-            let off = *acc;
-            *acc += chunk_count(i);
-            Some(off)
-        })
-        .collect();
+    let layout = ChunkLayout::new(count, world);
 
     let next = (rank + 1) % world;
     let prev = (rank + world - 1) % world;
@@ -108,13 +92,13 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
     // Phase 1: Pipelined scatter-reduce (N-1 rounds).
     for step in 0..(world - 1) {
         let send_idx = (rank + world - step) % world;
-        let send_off = chunk_offsets[send_idx];
-        let send_count = chunk_count(send_idx);
+        let send_off = layout.offsets[send_idx];
+        let send_count = layout.chunk_count(send_idx);
         let send_bytes = send_count * elem_size;
 
         let recv_idx = (rank + world - step - 1) % world;
-        let recv_off = chunk_offsets[recv_idx];
-        let recv_count = chunk_count(recv_idx);
+        let recv_off = layout.offsets[recv_idx];
+        let recv_count = layout.chunk_count(recv_idx);
         let recv_bytes = recv_count * elem_size;
 
         let num_segs = recv_bytes.max(send_bytes).div_ceil(PIPELINE_SEGMENT_BYTES);
@@ -222,13 +206,13 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
     // Phase 2: Pipelined allgather (N-1 rounds).
     for step in 0..(world - 1) {
         let send_idx = (rank + world + 1 - step) % world;
-        let send_off = chunk_offsets[send_idx];
-        let send_count_s = chunk_count(send_idx);
+        let send_off = layout.offsets[send_idx];
+        let send_count_s = layout.chunk_count(send_idx);
         let send_bytes = send_count_s * elem_size;
 
         let recv_idx = (rank + world - step) % world;
-        let recv_off = chunk_offsets[recv_idx];
-        let recv_count_r = chunk_count(recv_idx);
+        let recv_off = layout.offsets[recv_idx];
+        let recv_count_r = layout.chunk_count(recv_idx);
         let recv_bytes = recv_count_r * elem_size;
 
         let num_segs = recv_bytes.max(send_bytes).div_ceil(PIPELINE_SEGMENT_BYTES);
