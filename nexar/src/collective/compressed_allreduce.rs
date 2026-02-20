@@ -8,16 +8,10 @@
 //!
 //! # Memory complexity
 //!
-//! Each rank accumulates **all** N compressed chunks before reducing,
-//! requiring `O(N × compressed_chunk_size)` memory where N is the world
-//! size. For a 1 GiB tensor at 10% compression ratio with 64 ranks,
-//! each rank holds ~6.4 GiB of compressed data simultaneously.
-//!
-//! This is inherent to the allgather-then-reduce algorithm — it is the
-//! only correct approach for arbitrary (potentially non-additive)
-//! compressors. For large world sizes (>32 ranks) with big tensors,
-//! prefer `nexar-nccl`'s hierarchical allreduce or uncompressed
-//! ring allreduce instead.
+//! Each chunk is decompressed and reduced into a running accumulator
+//! as it arrives, so only one compressed chunk plus one dense buffer
+//! are live at any time — `O(compressed_chunk_size + tensor_size)`
+//! memory per rank regardless of world size.
 
 use crate::client::NexarClient;
 use crate::collective::helpers::{collective_recv, collective_send};
@@ -74,42 +68,39 @@ pub async unsafe fn ring_allreduce_compressed(
     let compressed = compressor.compress(&data, count, dtype, residual);
     let my_compressed = compressed.data;
 
-    // Exchange compressed data with all peers using a ring pattern.
-    // Each rank sends its compressed data to the next rank and receives
-    // from the previous, repeated N-1 times so all ranks get all data.
+    // Decompress our own contribution into the running accumulator.
+    let ct_local = CompressedTensor {
+        data: my_compressed.clone(),
+        original_count: count,
+        dtype,
+    };
+    let mut result = vec![0u8; total_bytes];
+    compressor.decompress(&ct_local, &mut result);
+
+    // Forward compressed data around the ring: N-1 steps.
+    // Each received chunk is decompressed and reduced immediately,
+    // so only one compressed chunk is live at a time.
     let my_rank = client.rank();
     let next = (my_rank + 1) % client.world_size();
     let prev = (my_rank + client.world_size() - 1) % client.world_size();
 
-    let mut all_compressed = Vec::with_capacity(world);
-    all_compressed.push(my_compressed.clone());
-
-    // Forward compressed data around the ring: N-1 steps.
     let mut to_forward = my_compressed;
+    let mut dense_tmp = vec![0u8; total_bytes];
     for _step in 0..(world - 1) {
         let (_, received) = tokio::try_join!(
             collective_send(client, next, &to_forward, "allreduce_compressed"),
             collective_recv(client, prev, "allreduce_compressed"),
         )?;
         to_forward = received.to_vec();
-        all_compressed.push(to_forward.clone());
-    }
 
-    // Decompress all contributions and reduce locally.
-    let mut result = vec![0u8; total_bytes];
-    for (i, compressed_data) in all_compressed.into_iter().enumerate() {
+        // Decompress and reduce into accumulator immediately.
         let ct = CompressedTensor {
-            data: compressed_data,
+            data: to_forward.clone(),
             original_count: count,
             dtype,
         };
-        let mut dense = vec![0u8; total_bytes];
-        compressor.decompress(&ct, &mut dense);
-        if i == 0 {
-            result.copy_from_slice(&dense);
-        } else {
-            reduce_slice(&mut result, &dense, count, dtype, op)?;
-        }
+        compressor.decompress(&ct, &mut dense_tmp);
+        reduce_slice(&mut result, &dense_tmp, count, dtype, op)?;
     }
 
     // Write the final reduced result back to device.

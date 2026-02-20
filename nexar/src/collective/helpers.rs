@@ -61,32 +61,6 @@ pub(crate) fn collective_timeout(client: &NexarClient) -> Duration {
     client.config.collective_timeout
 }
 
-/// Receive bytes using best available transport (RDMA then QUIC) with timeout.
-///
-/// Only useful when the expected size is known (e.g., fixed-size collectives).
-#[allow(dead_code)]
-pub(crate) async fn collective_recv_best_effort(
-    client: &NexarClient,
-    src: Rank,
-    expected_size: usize,
-    operation: &'static str,
-) -> Result<PooledBuf> {
-    let timeout = collective_timeout(client);
-    match tokio::time::timeout(timeout, client.recv_bytes_best_effort(src, expected_size)).await {
-        Ok(Ok(buf)) => Ok(buf),
-        Ok(Err(e)) => Err(NexarError::CollectiveFailed {
-            operation,
-            rank: src,
-            reason: e.to_string(),
-        }),
-        Err(_) => Err(NexarError::CollectiveFailed {
-            operation,
-            rank: src,
-            reason: format!("recv timed out after {}s", timeout.as_secs()),
-        }),
-    }
-}
-
 /// Tag context for collective operations: `None` for untagged (default lane),
 /// `Some(tag)` for tagged transport (concurrent collectives).
 pub(crate) type CollectiveTag = Option<u64>;
@@ -155,7 +129,7 @@ pub(crate) async fn collective_recv_with_tag(
         Some(t) => {
             tokio::time::timeout(timeout, client.recv_bytes_tagged_best_effort(src, t, 0)).await
         }
-        None => tokio::time::timeout(timeout, client.recv_bytes(src)).await,
+        None => tokio::time::timeout(timeout, client.recv_bytes_best_effort(src, 0)).await,
     };
     match result {
         Ok(Ok(buf)) => Ok(buf),

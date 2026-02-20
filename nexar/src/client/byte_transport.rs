@@ -115,7 +115,6 @@ impl NexarClient {
     /// Tries `BulkTransport::recv_bulk` first (e.g., RDMA), falling back to QUIC.
     /// Only works for the default communicator (comm_id 0) and requires knowing
     /// the expected size.
-    #[allow(dead_code)]
     pub(crate) async fn recv_bytes_best_effort(
         &self,
         src: Rank,
