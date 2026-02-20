@@ -6,6 +6,7 @@ mod broadcast;
 mod gather;
 mod handle;
 mod helpers;
+mod pipelined_allreduce;
 mod reduce;
 mod reduce_scatter;
 mod scan;

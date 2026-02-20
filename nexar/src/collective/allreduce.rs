@@ -35,9 +35,21 @@ pub(crate) async unsafe fn ring_allreduce_with_tag(
     tag: CollectiveTag,
 ) -> Result<()> {
     let world = client.world_size() as usize;
+
     if world <= 4 {
+        // Small clusters: ring allreduce, with pipelining for large tensors.
+        let total_bytes = count * dtype.size_in_bytes();
+        if total_bytes >= crate::collective::pipelined_allreduce::PIPELINE_THRESHOLD_BYTES {
+            return unsafe {
+                crate::collective::pipelined_allreduce::pipelined_ring_allreduce(
+                    client, ptr, count, dtype, op, tag,
+                )
+                .await
+            };
+        }
         unsafe { ring_allreduce_impl(client, ptr, count, dtype, op, tag).await }
     } else {
+        // Large clusters: halving-doubling is O(log N) vs ring's O(N).
         unsafe { halving_doubling_allreduce(client, ptr, count, dtype, op, tag).await }
     }
 }
