@@ -7,6 +7,8 @@ pub mod error;
 pub mod memory;
 pub mod protocol;
 pub mod reduce;
+#[cfg(target_arch = "x86_64")]
+mod reduce_simd;
 pub mod rpc;
 pub mod transport;
 pub mod types;

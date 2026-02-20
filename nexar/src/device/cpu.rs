@@ -203,20 +203,29 @@ mod tests {
     }
 
     #[test]
-    fn test_reduce_unsupported_dtype() {
+    fn test_reduce_f16_supported() {
+        use crate::reduce::F16;
         let adapter = CpuAdapter::new();
+        let a = [F16::from_f32(1.0), F16::from_f32(2.0)];
+        let b = [F16::from_f32(10.0), F16::from_f32(20.0)];
         let mut dst = [0u8; 4];
-        let src = [0u8; 4];
+        let mut src = [0u8; 4];
+        dst[0..2].copy_from_slice(&a[0].0.to_le_bytes());
+        dst[2..4].copy_from_slice(&a[1].0.to_le_bytes());
+        src[0..2].copy_from_slice(&b[0].0.to_le_bytes());
+        src[2..4].copy_from_slice(&b[1].0.to_le_bytes());
 
         let result = unsafe {
             adapter.reduce_inplace(
                 dst.as_mut_ptr() as u64,
                 &src,
                 2,
-                DataType::F16, // F16 not supported for reduce
+                DataType::F16,
                 ReduceOp::Sum,
             )
         };
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        let r0 = F16(u16::from_le_bytes([dst[0], dst[1]])).to_f32();
+        assert!((r0 - 11.0).abs() < 0.01);
     }
 }
