@@ -49,6 +49,25 @@ pub async unsafe fn ring_allreduce_compressed(
     let elem_size = dtype.size_in_bytes();
     let total_bytes = count * elem_size;
 
+    // Memory guard: worst-case the algorithm holds world × total_bytes
+    // for compressed chunks plus world × total_bytes for decompression.
+    let max_bytes = client.config().compressed_allreduce_max_bytes;
+    if max_bytes > 0 {
+        let estimated = world.saturating_mul(total_bytes).saturating_mul(2);
+        if estimated > max_bytes {
+            return Err(crate::error::NexarError::CollectiveFailed {
+                operation: "allreduce_compressed",
+                rank: client.rank(),
+                reason: format!(
+                    "estimated memory {estimated} bytes ({world} ranks × {total_bytes} bytes × 2) \
+                     exceeds compressed_allreduce_max_bytes limit ({max_bytes} bytes). \
+                     Use uncompressed ring allreduce or nexar-nccl's hierarchical allreduce instead, \
+                     or raise the limit via NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES"
+                ),
+            });
+        }
+    }
+
     let data = unsafe { client.adapter().stage_for_send(ptr, total_bytes)? };
 
     // Compress local data with error feedback.

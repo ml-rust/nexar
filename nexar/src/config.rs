@@ -41,12 +41,21 @@ pub struct NexarConfig {
 
     /// Require TLS encryption on TCP bulk sidecar connections.
     ///
-    /// When `true`, the TCP sidecar uses TLS with the cluster CA for
-    /// encryption. This adds CPU overhead but ensures all tensor data
-    /// is encrypted in transit.
+    /// Defaults to `true` (encrypted). When `true`, the TCP sidecar uses
+    /// TLS with the cluster CA for encryption. Set to `false` to disable
+    /// encryption for maximum throughput on trusted networks (e.g. isolated
+    /// InfiniBand fabrics).
     ///
     /// Only meaningful when `enable_tcp_bulk_sidecar` is `true`.
     pub encrypt_bulk_transport: bool,
+
+    /// Maximum memory (in bytes) that compressed allreduce may allocate for
+    /// buffering compressed chunks from all peers.
+    ///
+    /// The allgather-then-reduce algorithm requires `O(N × chunk_size)` memory
+    /// where N is the world size. This limit prevents OOM crashes on large
+    /// clusters. Set to `0` to disable the check.
+    pub compressed_allreduce_max_bytes: usize,
 }
 
 impl Default for NexarConfig {
@@ -59,7 +68,8 @@ impl Default for NexarConfig {
             pipeline_segment_bytes: 2 * 1024 * 1024, // 2 MiB
             ring_max_world: 8,
             enable_tcp_bulk_sidecar: true,
-            encrypt_bulk_transport: false,
+            encrypt_bulk_transport: true,
+            compressed_allreduce_max_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
         }
     }
 }
@@ -75,7 +85,8 @@ impl NexarConfig {
     /// - `NEXAR_PIPELINE_SEGMENT_BYTES`
     /// - `NEXAR_RING_MAX_WORLD`
     /// - `NEXAR_ENABLE_TCP_BULK_SIDECAR` (default: true, set to "0" or "false" to disable)
-    /// - `NEXAR_ENCRYPT_BULK_TRANSPORT` (default: false, set to "1" or "true" to enable)
+    /// - `NEXAR_ENCRYPT_BULK_TRANSPORT` (default: true, set to "0" or "false" to disable)
+    /// - `NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES` (default: 4 GiB, set to "0" to disable)
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
@@ -113,7 +124,12 @@ impl NexarConfig {
             cfg.enable_tcp_bulk_sidecar = v != "0" && v.to_lowercase() != "false";
         }
         if let Ok(v) = std::env::var("NEXAR_ENCRYPT_BULK_TRANSPORT") {
-            cfg.encrypt_bulk_transport = v == "1" || v.to_lowercase() == "true";
+            cfg.encrypt_bulk_transport = v != "0" && v.to_lowercase() != "false";
+        }
+        if let Ok(v) = std::env::var("NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.compressed_allreduce_max_bytes = n;
         }
 
         cfg
