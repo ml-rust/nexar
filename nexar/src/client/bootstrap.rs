@@ -23,7 +23,7 @@ impl NexarClient {
         adapter: Arc<dyn DeviceAdapter>,
     ) -> Result<Vec<NexarClient>> {
         let seed_addr: SocketAddr = "127.0.0.1:0".parse().expect("hardcoded socket addr");
-        let seed = SeedNode::bind(seed_addr, world_size)?;
+        let seed = SeedNode::bind_local(seed_addr, world_size)?;
         let seed_addr = seed.local_addr();
 
         // Spawn seed.
@@ -187,6 +187,9 @@ async fn build_mesh(
 /// The resulting `TcpBulkTransport` is attached as a `TaggedBulkTransport`
 /// extension so `send_raw_tagged_best_effort` / `recv_bytes_tagged_best_effort`
 /// automatically use the fast path.
+///
+/// Respects `NexarConfig::enable_tcp_bulk_sidecar` — skips entirely if disabled.
+/// Emits a warning when establishing unencrypted sidecars on non-loopback addresses.
 async fn establish_tcp_sidecars(clients: &[NexarClient]) -> Result<()> {
     use crate::transport::TaggedBulkTransport;
     use crate::transport::tcp_bulk::{tcp_bulk_accept, tcp_bulk_connect, tcp_bulk_listen};
@@ -194,6 +197,21 @@ async fn establish_tcp_sidecars(clients: &[NexarClient]) -> Result<()> {
     let n = clients.len();
     if n <= 1 {
         return Ok(());
+    }
+
+    // Check config from the first client (all share the same config in a cluster).
+    let config = clients[0].config();
+    if !config.enable_tcp_bulk_sidecar {
+        tracing::info!("TCP bulk sidecar disabled by config");
+        return Ok(());
+    }
+
+    if !config.encrypt_bulk_transport {
+        tracing::warn!(
+            "TCP bulk sidecar is UNENCRYPTED. Tensor data will be sent in plaintext. \
+             Set NEXAR_ENCRYPT_BULK_TRANSPORT=true or config.encrypt_bulk_transport=true \
+             to enable TLS on the bulk transport."
+        );
     }
 
     // For each pair (i, j) with i < j: i listens, j connects.

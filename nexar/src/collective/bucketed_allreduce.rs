@@ -77,36 +77,18 @@ pub(crate) async unsafe fn allreduce_bucketed_with_tag(
     let total_count: usize = entries.iter().map(|&(_, c)| c).sum();
     let total_bytes = total_count * elem_size;
 
-    // Write the flat buffer to device at the first entry's pointer won't work
-    // generically. Instead, allocate a contiguous host region and treat it as
-    // the "device" for the allreduce. This works correctly for CpuAdapter.
-    //
-    // For GPU adapters: the flat buffer lives on host. We write it to the first
-    // entry's device location (which must have enough space), allreduce there,
-    // then scatter back. If the first entry isn't large enough, we fall back
-    // to individual allreduces.
-    //
-    // Practical approach: use a host-allocated buffer as the device pointer.
-    // CpuAdapter: works directly (host ptr = device ptr).
-    // GPU adapters: we write the flat buffer to device, allreduce, read back.
-
-    // Allocate a host buffer that we'll pass through the adapter round-trip.
+    // CpuAdapter treats host pointers as device pointers, so we allreduce
+    // directly in the host buffer and scatter the result back.
     let mut buf = flat;
     debug_assert_eq!(buf.len(), total_bytes);
 
-    // For the allreduce, we need a device pointer. Use the host buffer directly
-    // — CpuAdapter treats host pointers as device pointers. GPU users should
-    // prefer nexar-nccl for on-device bucketed operations.
     let buf_ptr = buf.as_mut_ptr() as u64;
     unsafe {
         ring_allreduce_with_tag(client, buf_ptr, total_count, dtype, op, tag).await?;
     }
 
-    // Re-read the result from the "device" (host buffer for CpuAdapter).
-    let result = unsafe { client.adapter().stage_for_send(buf_ptr, total_bytes)? };
-
     // Scatter the reduced data back to original device locations.
-    unsafe { client.adapter().receive_to_device_iov(&result, &regions)? };
+    unsafe { client.adapter().receive_to_device_iov(&buf, &regions)? };
 
     Ok(())
 }

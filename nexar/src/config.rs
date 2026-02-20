@@ -27,6 +27,26 @@ pub struct NexarConfig {
     /// Maximum world size for preferring ring allreduce over
     /// halving-doubling in the medium-message range.
     pub ring_max_world: usize,
+
+    /// Enable TCP bulk sidecar connections for large tensor transfers.
+    ///
+    /// When enabled, a raw TCP connection is established alongside each QUIC
+    /// peer connection. Collectives automatically prefer the TCP path for
+    /// large payloads to bypass QUIC's AES-256-GCM overhead.
+    ///
+    /// **Security warning:** Unless `encrypt_bulk_transport` is also set,
+    /// data sent via the TCP sidecar is **unencrypted**. Do not enable in
+    /// zero-trust environments (public clouds) without encryption.
+    pub enable_tcp_bulk_sidecar: bool,
+
+    /// Require TLS encryption on TCP bulk sidecar connections.
+    ///
+    /// When `true`, the TCP sidecar uses TLS with the cluster CA for
+    /// encryption. This adds CPU overhead but ensures all tensor data
+    /// is encrypted in transit.
+    ///
+    /// Only meaningful when `enable_tcp_bulk_sidecar` is `true`.
+    pub encrypt_bulk_transport: bool,
 }
 
 impl Default for NexarConfig {
@@ -38,6 +58,8 @@ impl Default for NexarConfig {
             large_msg_bytes: 8 * 1024 * 1024,        // 8 MiB
             pipeline_segment_bytes: 2 * 1024 * 1024, // 2 MiB
             ring_max_world: 8,
+            enable_tcp_bulk_sidecar: true,
+            encrypt_bulk_transport: false,
         }
     }
 }
@@ -52,6 +74,8 @@ impl NexarConfig {
     /// - `NEXAR_LARGE_MSG_BYTES`
     /// - `NEXAR_PIPELINE_SEGMENT_BYTES`
     /// - `NEXAR_RING_MAX_WORLD`
+    /// - `NEXAR_ENABLE_TCP_BULK_SIDECAR` (default: true, set to "0" or "false" to disable)
+    /// - `NEXAR_ENCRYPT_BULK_TRANSPORT` (default: false, set to "1" or "true" to enable)
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
@@ -84,6 +108,12 @@ impl NexarConfig {
             if let Ok(n) = v.parse::<usize>() {
                 cfg.ring_max_world = n;
             }
+        }
+        if let Ok(v) = std::env::var("NEXAR_ENABLE_TCP_BULK_SIDECAR") {
+            cfg.enable_tcp_bulk_sidecar = v != "0" && v.to_lowercase() != "false";
+        }
+        if let Ok(v) = std::env::var("NEXAR_ENCRYPT_BULK_TRANSPORT") {
+            cfg.encrypt_bulk_transport = v == "1" || v.to_lowercase() == "true";
         }
 
         cfg

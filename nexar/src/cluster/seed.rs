@@ -19,8 +19,9 @@ pub struct SeedNode {
     listener: TransportListener,
     expected_world_size: u32,
     formation_timeout: Duration,
-    /// Pre-shared cluster token. If set, workers must present this token
-    /// in their Hello message to be accepted.
+    /// Cluster token for authenticating workers during bootstrap.
+    /// Always `Some` in production (auto-generated if env var is unset).
+    /// `None` only for loopback testing via `bind_local`.
     cluster_token: Option<Vec<u8>>,
 }
 
@@ -28,17 +29,51 @@ impl SeedNode {
     /// Create a seed node bound to the given address.
     ///
     /// If the `NEXAR_CLUSTER_TOKEN` environment variable is set, workers must
-    /// present the same token in their Hello message to be accepted.
+    /// present the same token in their Hello message to be accepted. If the
+    /// variable is not set, a random token is auto-generated and logged so
+    /// that workers can be configured with it.
     pub fn bind(addr: SocketAddr, expected_world_size: u32) -> Result<Self> {
         let listener = TransportListener::bind(addr)?;
-        let cluster_token = std::env::var("NEXAR_CLUSTER_TOKEN")
-            .ok()
-            .map(|t| t.into_bytes());
+        let cluster_token = match std::env::var("NEXAR_CLUSTER_TOKEN") {
+            Ok(t) if !t.is_empty() => {
+                tracing::info!("using cluster token from NEXAR_CLUSTER_TOKEN env var");
+                t.into_bytes()
+            }
+            _ => {
+                // Generate a random 32-byte token using rcgen's CSPRNG-backed
+                // key generation. We take the first 32 bytes of the serialized
+                // ephemeral key as a cryptographically random token.
+                let ephemeral_key = rcgen::KeyPair::generate()
+                    .map_err(|e| NexarError::Tls(format!("generate cluster token: {e}")))?;
+                let der = ephemeral_key.serialize_der();
+                let token: Vec<u8> = der.into_iter().take(32).collect();
+                let hex_token: String = token.iter().map(|b| format!("{b:02x}")).collect();
+                tracing::warn!(
+                    "NEXAR_CLUSTER_TOKEN not set — auto-generated token: {hex_token}. \
+                     Set NEXAR_CLUSTER_TOKEN={hex_token} on workers to authenticate."
+                );
+                token
+            }
+        };
         Ok(Self {
             listener,
             expected_world_size,
             formation_timeout: Duration::from_secs(60),
-            cluster_token,
+            cluster_token: Some(cluster_token),
+        })
+    }
+
+    /// Create a seed node for loopback testing (no token enforcement).
+    ///
+    /// Skips cluster token generation/validation since all connections
+    /// are on localhost within the same process.
+    pub fn bind_local(addr: SocketAddr, expected_world_size: u32) -> Result<Self> {
+        let listener = TransportListener::bind(addr)?;
+        Ok(Self {
+            listener,
+            expected_world_size,
+            formation_timeout: Duration::from_secs(60),
+            cluster_token: None,
         })
     }
 

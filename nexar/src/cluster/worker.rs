@@ -113,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn test_single_worker_join() {
         let seed_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let seed = SeedNode::bind(seed_addr, 1).unwrap();
+        let seed = SeedNode::bind_local(seed_addr, 1).unwrap();
         let seed_addr = seed.local_addr();
 
         let (seed_result, worker_result) =
@@ -135,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn test_two_workers_join() {
         let seed_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let seed = SeedNode::bind(seed_addr, 2).unwrap();
+        let seed = SeedNode::bind_local(seed_addr, 2).unwrap();
         let seed_addr = seed.local_addr();
 
         let seed_handle = tokio::spawn(async move { seed.form_cluster().await });
@@ -166,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn test_four_workers_join() {
         let seed_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let seed = SeedNode::bind(seed_addr, 4).unwrap();
+        let seed = SeedNode::bind_local(seed_addr, 4).unwrap();
         let seed_addr = seed.local_addr();
 
         let seed_handle = tokio::spawn(async move { seed.form_cluster().await });
