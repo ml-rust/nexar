@@ -1,4 +1,4 @@
-use nexar::{CpuAdapter, DataType, NexarClient, ReduceOp};
+use nexar::{BufferRef, CpuAdapter, DataType, Host, NexarClient, ReduceOp};
 use std::sync::Arc;
 use tokio::sync::Barrier;
 
@@ -24,13 +24,11 @@ async fn test_split_two_groups() {
             assert_eq!(sub.world_size(), 2, "rank {rank}: sub world size wrong");
 
             let mut data = vec![(rank + 1) as f32; 4];
-            let ptr = data.as_mut_ptr() as u64;
+            let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 4 * 4) };
 
-            unsafe {
-                sub.all_reduce(ptr, 4, DataType::F32, ReduceOp::Sum)
-                    .await
-                    .unwrap();
-            }
+            sub.all_reduce_host(&mut buf, 4, DataType::F32, ReduceOp::Sum)
+                .await
+                .unwrap();
 
             // Group 0 (ranks 0,1): 1 + 2 = 3
             // Group 1 (ranks 2,3): 3 + 4 = 7

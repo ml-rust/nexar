@@ -6,7 +6,7 @@
 //! cargo run --example broadcast
 //! ```
 
-use nexar::{CpuAdapter, DataType, NexarClient};
+use nexar::{BufferRef, CpuAdapter, DataType, Host, NexarClient};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -34,10 +34,9 @@ async fn main() -> nexar::Result<()> {
                 vec![0.0f32; count]
             };
 
-            let ptr = data.as_mut_ptr() as u64;
-            unsafe {
-                c.broadcast(ptr, count, DataType::F32, root).await?;
-            }
+            let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, count * 4) };
+            c.broadcast_host(&mut buf, count, DataType::F32, root)
+                .await?;
 
             nexar::Result::Ok((rank, data))
         }));

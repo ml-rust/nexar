@@ -1,4 +1,4 @@
-use nexar::{DataType, ReduceOp};
+use nexar::{BufferRef, DataType, Host, ReduceOp};
 
 use super::helpers::run_collective;
 
@@ -7,14 +7,12 @@ async fn test_scan_3_nodes_sum() {
     run_collective(3, |client| async move {
         let rank = client.rank();
         let mut data = vec![(rank + 1) as f32; 4];
-        let ptr = data.as_mut_ptr() as u64;
+        let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 4 * 4) };
 
-        unsafe {
-            client
-                .scan(ptr, 4, DataType::F32, ReduceOp::Sum)
-                .await
-                .unwrap();
-        }
+        client
+            .scan_host(&mut buf, 4, DataType::F32, ReduceOp::Sum)
+            .await
+            .unwrap();
 
         let expected = match rank {
             0 => 1.0,
@@ -32,14 +30,12 @@ async fn test_scan_4_nodes_sum() {
     run_collective(4, |client| async move {
         let rank = client.rank();
         let mut data = vec![1.0f32; 2];
-        let ptr = data.as_mut_ptr() as u64;
+        let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 2 * 4) };
 
-        unsafe {
-            client
-                .scan(ptr, 2, DataType::F32, ReduceOp::Sum)
-                .await
-                .unwrap();
-        }
+        client
+            .scan_host(&mut buf, 2, DataType::F32, ReduceOp::Sum)
+            .await
+            .unwrap();
 
         let expected = (rank + 1) as f32;
         assert_eq!(data, vec![expected; 2], "rank {rank} scan 4-node failed");
@@ -52,14 +48,12 @@ async fn test_scan_2_nodes_max() {
     run_collective(2, |client| async move {
         let rank = client.rank();
         let mut data = vec![(rank + 1) as f32; 4];
-        let ptr = data.as_mut_ptr() as u64;
+        let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 4 * 4) };
 
-        unsafe {
-            client
-                .scan(ptr, 4, DataType::F32, ReduceOp::Max)
-                .await
-                .unwrap();
-        }
+        client
+            .scan_host(&mut buf, 4, DataType::F32, ReduceOp::Max)
+            .await
+            .unwrap();
 
         let expected = match rank {
             0 => 1.0,
@@ -76,14 +70,12 @@ async fn test_exclusive_scan_3_nodes_sum() {
     run_collective(3, |client| async move {
         let rank = client.rank();
         let mut data = vec![(rank + 1) as f32; 4];
-        let ptr = data.as_mut_ptr() as u64;
+        let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 4 * 4) };
 
-        unsafe {
-            client
-                .exclusive_scan(ptr, 4, DataType::F32, ReduceOp::Sum)
-                .await
-                .unwrap();
-        }
+        client
+            .exclusive_scan_host(&mut buf, 4, DataType::F32, ReduceOp::Sum)
+            .await
+            .unwrap();
 
         let expected = match rank {
             0 => 0.0,
@@ -101,14 +93,12 @@ async fn test_exclusive_scan_4_nodes_prod() {
     run_collective(4, |client| async move {
         let rank = client.rank();
         let mut data = vec![(rank + 1) as f32; 2];
-        let ptr = data.as_mut_ptr() as u64;
+        let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 2 * 4) };
 
-        unsafe {
-            client
-                .exclusive_scan(ptr, 2, DataType::F32, ReduceOp::Prod)
-                .await
-                .unwrap();
-        }
+        client
+            .exclusive_scan_host(&mut buf, 2, DataType::F32, ReduceOp::Prod)
+            .await
+            .unwrap();
 
         let expected = match rank {
             0 => 1.0,

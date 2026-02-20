@@ -1,5 +1,7 @@
+use crate::compression::Compressor;
 use crate::device::DeviceAdapter;
 use crate::error::Result;
+use crate::memory::{BufferRef, Device, Host};
 use crate::rpc::registry::RpcHandler;
 use crate::types::{DataType, Rank, ReduceOp};
 use std::sync::Arc;
@@ -261,6 +263,306 @@ impl SyncClient {
     /// Barrier.
     pub fn barrier(&self) -> Result<()> {
         self.rt.block_on(self.inner.barrier())
+    }
+
+    // ── Typed host buffer collectives ───────────────────────────────
+
+    /// AllReduce in-place on a host buffer.
+    pub fn all_reduce_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.all_reduce_host(buf, count, dtype, op))
+    }
+
+    /// Broadcast from root on a host buffer.
+    pub fn broadcast_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.broadcast_host(buf, count, dtype, root))
+    }
+
+    /// AllGather on host buffers.
+    pub fn all_gather_host(
+        &self,
+        send_buf: &BufferRef<Host>,
+        recv_buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.all_gather_host(send_buf, recv_buf, count, dtype))
+    }
+
+    /// ReduceScatter on host buffers.
+    pub fn reduce_scatter_host(
+        &self,
+        send_buf: &BufferRef<Host>,
+        recv_buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .reduce_scatter_host(send_buf, recv_buf, count, dtype, op),
+        )
+    }
+
+    /// Reduce to root on a host buffer.
+    pub fn reduce_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.reduce_host(buf, count, dtype, op, root))
+    }
+
+    /// All-to-all on host buffers.
+    pub fn all_to_all_host(
+        &self,
+        send_buf: &BufferRef<Host>,
+        recv_buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.all_to_all_host(send_buf, recv_buf, count, dtype))
+    }
+
+    /// Gather to root on host buffers.
+    pub fn gather_host(
+        &self,
+        send_buf: &BufferRef<Host>,
+        recv_buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .gather_host(send_buf, recv_buf, count, dtype, root),
+        )
+    }
+
+    /// Scatter from root on host buffers.
+    pub fn scatter_host(
+        &self,
+        send_buf: &BufferRef<Host>,
+        recv_buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .scatter_host(send_buf, recv_buf, count, dtype, root),
+        )
+    }
+
+    /// Inclusive prefix scan on a host buffer.
+    pub fn scan_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.scan_host(buf, count, dtype, op))
+    }
+
+    /// Exclusive prefix scan on a host buffer.
+    pub fn exclusive_scan_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.exclusive_scan_host(buf, count, dtype, op))
+    }
+
+    /// Compressed allreduce on a host buffer.
+    pub fn all_reduce_compressed_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+        compressor: &dyn Compressor,
+        residual: &mut [u8],
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .all_reduce_compressed_host(buf, count, dtype, op, compressor, residual),
+        )
+    }
+
+    // ── Typed device buffer collectives ─────────────────────────────
+
+    /// AllReduce in-place on a device buffer.
+    pub fn all_reduce_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.all_reduce_device(buf, count, dtype, op))
+    }
+
+    /// Broadcast from root on a device buffer.
+    pub fn broadcast_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.broadcast_device(buf, count, dtype, root))
+    }
+
+    /// AllGather on device buffers.
+    pub fn all_gather_device(
+        &self,
+        send_buf: &BufferRef<Device>,
+        recv_buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .all_gather_device(send_buf, recv_buf, count, dtype),
+        )
+    }
+
+    /// ReduceScatter on device buffers.
+    pub fn reduce_scatter_device(
+        &self,
+        send_buf: &BufferRef<Device>,
+        recv_buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .reduce_scatter_device(send_buf, recv_buf, count, dtype, op),
+        )
+    }
+
+    /// Reduce to root on a device buffer.
+    pub fn reduce_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.reduce_device(buf, count, dtype, op, root))
+    }
+
+    /// All-to-all on device buffers.
+    pub fn all_to_all_device(
+        &self,
+        send_buf: &BufferRef<Device>,
+        recv_buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .all_to_all_device(send_buf, recv_buf, count, dtype),
+        )
+    }
+
+    /// Gather to root on device buffers.
+    pub fn gather_device(
+        &self,
+        send_buf: &BufferRef<Device>,
+        recv_buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .gather_device(send_buf, recv_buf, count, dtype, root),
+        )
+    }
+
+    /// Scatter from root on device buffers.
+    pub fn scatter_device(
+        &self,
+        send_buf: &BufferRef<Device>,
+        recv_buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .scatter_device(send_buf, recv_buf, count, dtype, root),
+        )
+    }
+
+    /// Inclusive prefix scan on a device buffer.
+    pub fn scan_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.scan_device(buf, count, dtype, op))
+    }
+
+    /// Exclusive prefix scan on a device buffer.
+    pub fn exclusive_scan_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt
+            .block_on(self.inner.exclusive_scan_device(buf, count, dtype, op))
+    }
+
+    /// Compressed allreduce on a device buffer.
+    pub fn all_reduce_compressed_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+        compressor: &dyn Compressor,
+        residual: &mut [u8],
+    ) -> Result<()> {
+        self.rt.block_on(
+            self.inner
+                .all_reduce_compressed_device(buf, count, dtype, op, compressor, residual),
+        )
     }
 
     /// Register an RPC handler for a function ID.

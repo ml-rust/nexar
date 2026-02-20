@@ -4,6 +4,7 @@
 //! of raw `u64` pointers, providing compile-time memory space safety.
 //! The underlying unsafe collective implementations are unchanged.
 
+use crate::compression::Compressor;
 use crate::error::Result;
 use crate::memory::{BufferRef, Device, Host};
 use crate::types::{DataType, Rank, ReduceOp};
@@ -75,6 +76,88 @@ impl NexarClient {
     ) -> Result<()> {
         unsafe { self.reduce(buf.as_u64(), count, dtype, op, root).await }
     }
+
+    /// All-to-all on host buffers.
+    pub async fn all_to_all_host(
+        &self,
+        send_buf: &BufferRef<Host>,
+        recv_buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+    ) -> Result<()> {
+        unsafe {
+            self.all_to_all(send_buf.as_u64(), recv_buf.as_u64(), count, dtype)
+                .await
+        }
+    }
+
+    /// Gather to root on host buffers.
+    pub async fn gather_host(
+        &self,
+        send_buf: &BufferRef<Host>,
+        recv_buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        unsafe {
+            self.gather(send_buf.as_u64(), recv_buf.as_u64(), count, dtype, root)
+                .await
+        }
+    }
+
+    /// Scatter from root on host buffers.
+    pub async fn scatter_host(
+        &self,
+        send_buf: &BufferRef<Host>,
+        recv_buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        unsafe {
+            self.scatter(send_buf.as_u64(), recv_buf.as_u64(), count, dtype, root)
+                .await
+        }
+    }
+
+    /// Inclusive prefix scan on a host buffer.
+    pub async fn scan_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        unsafe { self.scan(buf.as_u64(), count, dtype, op).await }
+    }
+
+    /// Exclusive prefix scan on a host buffer.
+    pub async fn exclusive_scan_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        unsafe { self.exclusive_scan(buf.as_u64(), count, dtype, op).await }
+    }
+
+    /// Compressed allreduce on a host buffer.
+    pub async fn all_reduce_compressed_host(
+        &self,
+        buf: &mut BufferRef<Host>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+        compressor: &dyn Compressor,
+        residual: &mut [u8],
+    ) -> Result<()> {
+        unsafe {
+            self.all_reduce_compressed(buf.as_u64(), count, dtype, op, compressor, residual)
+                .await
+        }
+    }
 }
 
 // ── Device buffer collectives ───────────────────────────────────────
@@ -141,5 +224,87 @@ impl NexarClient {
         root: Rank,
     ) -> Result<()> {
         unsafe { self.reduce(buf.as_u64(), count, dtype, op, root).await }
+    }
+
+    /// All-to-all on device buffers.
+    pub async fn all_to_all_device(
+        &self,
+        send_buf: &BufferRef<Device>,
+        recv_buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+    ) -> Result<()> {
+        unsafe {
+            self.all_to_all(send_buf.as_u64(), recv_buf.as_u64(), count, dtype)
+                .await
+        }
+    }
+
+    /// Gather to root on device buffers.
+    pub async fn gather_device(
+        &self,
+        send_buf: &BufferRef<Device>,
+        recv_buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        unsafe {
+            self.gather(send_buf.as_u64(), recv_buf.as_u64(), count, dtype, root)
+                .await
+        }
+    }
+
+    /// Scatter from root on device buffers.
+    pub async fn scatter_device(
+        &self,
+        send_buf: &BufferRef<Device>,
+        recv_buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        root: Rank,
+    ) -> Result<()> {
+        unsafe {
+            self.scatter(send_buf.as_u64(), recv_buf.as_u64(), count, dtype, root)
+                .await
+        }
+    }
+
+    /// Inclusive prefix scan on a device buffer.
+    pub async fn scan_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        unsafe { self.scan(buf.as_u64(), count, dtype, op).await }
+    }
+
+    /// Exclusive prefix scan on a device buffer.
+    pub async fn exclusive_scan_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        unsafe { self.exclusive_scan(buf.as_u64(), count, dtype, op).await }
+    }
+
+    /// Compressed allreduce on a device buffer.
+    pub async fn all_reduce_compressed_device(
+        &self,
+        buf: &mut BufferRef<Device>,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+        compressor: &dyn Compressor,
+        residual: &mut [u8],
+    ) -> Result<()> {
+        unsafe {
+            self.all_reduce_compressed(buf.as_u64(), count, dtype, op, compressor, residual)
+                .await
+        }
     }
 }

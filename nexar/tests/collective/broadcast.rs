@@ -1,4 +1,4 @@
-use nexar::DataType;
+use nexar::{BufferRef, DataType, Host};
 
 use super::helpers::run_collective;
 
@@ -11,11 +11,12 @@ async fn test_broadcast_from_root_0() {
         } else {
             vec![0.0; 4]
         };
-        let ptr = data.as_mut_ptr() as u64;
+        let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 4 * 4) };
 
-        unsafe {
-            client.broadcast(ptr, 4, DataType::F32, 0).await.unwrap();
-        }
+        client
+            .broadcast_host(&mut buf, 4, DataType::F32, 0)
+            .await
+            .unwrap();
 
         assert_eq!(
             data,
@@ -36,11 +37,12 @@ async fn test_broadcast_from_nonzero_root() {
         } else {
             vec![0.0; 3]
         };
-        let ptr = data.as_mut_ptr() as u64;
+        let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 3 * 4) };
 
-        unsafe {
-            client.broadcast(ptr, 3, DataType::F32, root).await.unwrap();
-        }
+        client
+            .broadcast_host(&mut buf, 3, DataType::F32, root)
+            .await
+            .unwrap();
 
         assert_eq!(
             data,
@@ -56,11 +58,12 @@ async fn test_broadcast_5_nodes_tree() {
     run_collective(5, |client| async move {
         let rank = client.rank();
         let mut data: Vec<i32> = if rank == 0 { vec![7, 8, 9] } else { vec![0; 3] };
-        let ptr = data.as_mut_ptr() as u64;
+        let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, 3 * 4) };
 
-        unsafe {
-            client.broadcast(ptr, 3, DataType::I32, 0).await.unwrap();
-        }
+        client
+            .broadcast_host(&mut buf, 3, DataType::I32, 0)
+            .await
+            .unwrap();
 
         assert_eq!(data, vec![7, 8, 9], "rank {rank} tree broadcast failed");
     })

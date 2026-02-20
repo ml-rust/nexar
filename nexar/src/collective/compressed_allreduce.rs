@@ -5,6 +5,19 @@
 //! decompresses and reduces all contributions. This avoids the
 //! accumulation-of-sums problem that a naive ring approach would have
 //! with compression.
+//!
+//! # Memory complexity
+//!
+//! Each rank accumulates **all** N compressed chunks before reducing,
+//! requiring `O(N × compressed_chunk_size)` memory where N is the world
+//! size. For a 1 GiB tensor at 10% compression ratio with 64 ranks,
+//! each rank holds ~6.4 GiB of compressed data simultaneously.
+//!
+//! This is inherent to the allgather-then-reduce algorithm — it is the
+//! only correct approach for arbitrary (potentially non-additive)
+//! compressors. For large world sizes (>32 ranks) with big tensors,
+//! prefer `nexar-nccl`'s hierarchical allreduce or uncompressed
+//! ring allreduce instead.
 
 use crate::client::NexarClient;
 use crate::collective::helpers::{collective_recv, collective_send};

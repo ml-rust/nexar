@@ -1,4 +1,4 @@
-use nexar::DataType;
+use nexar::{BufferRef, DataType, Host};
 
 use super::helpers::run_collective;
 
@@ -13,15 +13,13 @@ async fn test_allgather_3_nodes() {
         let send_data: Vec<f32> = vec![(rank + 1) as f32; 2];
         let mut recv_data: Vec<f32> = vec![0.0; 6];
 
-        let send_ptr = send_data.as_ptr() as u64;
-        let recv_ptr = recv_data.as_mut_ptr() as u64;
+        let send_buf = unsafe { BufferRef::<Host>::new(send_data.as_ptr() as u64, 2 * 4) };
+        let mut recv_buf = unsafe { BufferRef::<Host>::new(recv_data.as_mut_ptr() as u64, 6 * 4) };
 
-        unsafe {
-            client
-                .all_gather(send_ptr, recv_ptr, 2, DataType::F32)
-                .await
-                .unwrap();
-        }
+        client
+            .all_gather_host(&send_buf, &mut recv_buf, 2, DataType::F32)
+            .await
+            .unwrap();
 
         assert_eq!(
             recv_data,
@@ -39,15 +37,13 @@ async fn test_allgather_4_nodes() {
         let send_data: Vec<i32> = vec![(rank as i32) * 10; 3];
         let mut recv_data: Vec<i32> = vec![0; 12];
 
-        let send_ptr = send_data.as_ptr() as u64;
-        let recv_ptr = recv_data.as_mut_ptr() as u64;
+        let send_buf = unsafe { BufferRef::<Host>::new(send_data.as_ptr() as u64, 3 * 4) };
+        let mut recv_buf = unsafe { BufferRef::<Host>::new(recv_data.as_mut_ptr() as u64, 12 * 4) };
 
-        unsafe {
-            client
-                .all_gather(send_ptr, recv_ptr, 3, DataType::I32)
-                .await
-                .unwrap();
-        }
+        client
+            .all_gather_host(&send_buf, &mut recv_buf, 3, DataType::I32)
+            .await
+            .unwrap();
 
         let expected = vec![0, 0, 0, 10, 10, 10, 20, 20, 20, 30, 30, 30];
         assert_eq!(recv_data, expected, "rank {rank} allgather 4-node failed");
@@ -71,15 +67,13 @@ async fn test_alltoall_2_nodes() {
         ];
         let mut recv_data: Vec<f32> = vec![0.0; 4];
 
-        let send_ptr = send_data.as_ptr() as u64;
-        let recv_ptr = recv_data.as_mut_ptr() as u64;
+        let send_buf = unsafe { BufferRef::<Host>::new(send_data.as_ptr() as u64, 4 * 4) };
+        let mut recv_buf = unsafe { BufferRef::<Host>::new(recv_data.as_mut_ptr() as u64, 4 * 4) };
 
-        unsafe {
-            client
-                .all_to_all(send_ptr, recv_ptr, 2, DataType::F32)
-                .await
-                .unwrap();
-        }
+        client
+            .all_to_all_host(&send_buf, &mut recv_buf, 2, DataType::F32)
+            .await
+            .unwrap();
 
         let expected = if rank == 0 {
             vec![0.0, 1.0, 10.0, 11.0]
@@ -98,15 +92,13 @@ async fn test_alltoall_4_nodes() {
         let send_data: Vec<i32> = (0..4).map(|dest| (rank * 100 + dest) as i32).collect();
         let mut recv_data: Vec<i32> = vec![0; 4];
 
-        let send_ptr = send_data.as_ptr() as u64;
-        let recv_ptr = recv_data.as_mut_ptr() as u64;
+        let send_buf = unsafe { BufferRef::<Host>::new(send_data.as_ptr() as u64, 4 * 4) };
+        let mut recv_buf = unsafe { BufferRef::<Host>::new(recv_data.as_mut_ptr() as u64, 4 * 4) };
 
-        unsafe {
-            client
-                .all_to_all(send_ptr, recv_ptr, 1, DataType::I32)
-                .await
-                .unwrap();
-        }
+        client
+            .all_to_all_host(&send_buf, &mut recv_buf, 1, DataType::I32)
+            .await
+            .unwrap();
 
         let expected: Vec<i32> = (0..4).map(|src| (src * 100 + rank) as i32).collect();
         assert_eq!(recv_data, expected, "rank {rank} alltoall 4-node failed");
@@ -125,15 +117,13 @@ async fn test_gather_3_nodes() {
         let send_data: Vec<f32> = vec![(rank + 1) as f32; 2];
         let mut recv_data: Vec<f32> = vec![0.0; 6];
 
-        let send_ptr = send_data.as_ptr() as u64;
-        let recv_ptr = recv_data.as_mut_ptr() as u64;
+        let send_buf = unsafe { BufferRef::<Host>::new(send_data.as_ptr() as u64, 2 * 4) };
+        let mut recv_buf = unsafe { BufferRef::<Host>::new(recv_data.as_mut_ptr() as u64, 6 * 4) };
 
-        unsafe {
-            client
-                .gather(send_ptr, recv_ptr, 2, DataType::F32, 0)
-                .await
-                .unwrap();
-        }
+        client
+            .gather_host(&send_buf, &mut recv_buf, 2, DataType::F32, 0)
+            .await
+            .unwrap();
 
         if rank == 0 {
             assert_eq!(recv_data, vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
@@ -149,15 +139,13 @@ async fn test_gather_4_nodes_nonzero_root() {
         let send_data: Vec<i32> = vec![(rank as i32) * 10; 3];
         let mut recv_data: Vec<i32> = vec![0; 12];
 
-        let send_ptr = send_data.as_ptr() as u64;
-        let recv_ptr = recv_data.as_mut_ptr() as u64;
+        let send_buf = unsafe { BufferRef::<Host>::new(send_data.as_ptr() as u64, 3 * 4) };
+        let mut recv_buf = unsafe { BufferRef::<Host>::new(recv_data.as_mut_ptr() as u64, 12 * 4) };
 
-        unsafe {
-            client
-                .gather(send_ptr, recv_ptr, 3, DataType::I32, 2)
-                .await
-                .unwrap();
-        }
+        client
+            .gather_host(&send_buf, &mut recv_buf, 3, DataType::I32, 2)
+            .await
+            .unwrap();
 
         if rank == 2 {
             let expected = vec![0, 0, 0, 10, 10, 10, 20, 20, 20, 30, 30, 30];
@@ -178,15 +166,13 @@ async fn test_scatter_3_nodes() {
         let send_data: Vec<f32> = vec![10.0, 11.0, 20.0, 21.0, 30.0, 31.0];
         let mut recv_data: Vec<f32> = vec![0.0; 2];
 
-        let send_ptr = send_data.as_ptr() as u64;
-        let recv_ptr = recv_data.as_mut_ptr() as u64;
+        let send_buf = unsafe { BufferRef::<Host>::new(send_data.as_ptr() as u64, 6 * 4) };
+        let mut recv_buf = unsafe { BufferRef::<Host>::new(recv_data.as_mut_ptr() as u64, 2 * 4) };
 
-        unsafe {
-            client
-                .scatter(send_ptr, recv_ptr, 2, DataType::F32, 0)
-                .await
-                .unwrap();
-        }
+        client
+            .scatter_host(&send_buf, &mut recv_buf, 2, DataType::F32, 0)
+            .await
+            .unwrap();
 
         let expected = match rank {
             0 => vec![10.0, 11.0],
@@ -206,15 +192,13 @@ async fn test_scatter_4_nodes_nonzero_root() {
         let send_data: Vec<i32> = vec![100, 200, 300, 400];
         let mut recv_data: Vec<i32> = vec![0; 1];
 
-        let send_ptr = send_data.as_ptr() as u64;
-        let recv_ptr = recv_data.as_mut_ptr() as u64;
+        let send_buf = unsafe { BufferRef::<Host>::new(send_data.as_ptr() as u64, 4 * 4) };
+        let mut recv_buf = unsafe { BufferRef::<Host>::new(recv_data.as_mut_ptr() as u64, 4) };
 
-        unsafe {
-            client
-                .scatter(send_ptr, recv_ptr, 1, DataType::I32, 2)
-                .await
-                .unwrap();
-        }
+        client
+            .scatter_host(&send_buf, &mut recv_buf, 1, DataType::I32, 2)
+            .await
+            .unwrap();
 
         let expected = match rank {
             0 => vec![100],

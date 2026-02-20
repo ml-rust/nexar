@@ -7,7 +7,7 @@
 //! cargo run --example allreduce
 //! ```
 
-use nexar::{CpuAdapter, DataType, NexarClient, ReduceOp};
+use nexar::{BufferRef, CpuAdapter, DataType, Host, NexarClient, ReduceOp};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -30,12 +30,10 @@ async fn main() -> nexar::Result<()> {
         let rank = c.rank();
         handles.push(tokio::spawn(async move {
             let mut data = vec![rank as f32; count];
-            let ptr = data.as_mut_ptr() as u64;
+            let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, count * 4) };
 
-            unsafe {
-                c.all_reduce(ptr, count, DataType::F32, ReduceOp::Sum)
-                    .await?;
-            }
+            c.all_reduce_host(&mut buf, count, DataType::F32, ReduceOp::Sum)
+                .await?;
 
             // After Sum allreduce: each element = 0 + 1 + 2 + 3 = 6.0
             nexar::Result::Ok((rank, data))

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use nexar::compression::{Compressor, NoCompression, RandomKCompressor, TopKCompressor};
-use nexar::{DataType, ReduceOp};
+use nexar::{BufferRef, DataType, Host, ReduceOp};
 
 use super::helpers::run_collective;
 
@@ -13,22 +13,20 @@ async fn run_compressed_allreduce(world_size: u32, count: usize, compressor: Arc
             let rank = client.rank();
             let val = (rank + 1) as f32;
             let mut data = vec![val; count];
-            let ptr = data.as_mut_ptr() as u64;
+            let mut buf = unsafe { BufferRef::<Host>::new(data.as_mut_ptr() as u64, count * 4) };
             let mut residual = vec![0u8; count * 4];
 
-            unsafe {
-                client
-                    .all_reduce_compressed(
-                        ptr,
-                        count,
-                        DataType::F32,
-                        ReduceOp::Sum,
-                        compressor.as_ref(),
-                        &mut residual,
-                    )
-                    .await
-                    .unwrap();
-            }
+            client
+                .all_reduce_compressed_host(
+                    &mut buf,
+                    count,
+                    DataType::F32,
+                    ReduceOp::Sum,
+                    compressor.as_ref(),
+                    &mut residual,
+                )
+                .await
+                .unwrap();
 
             // Sum of 1..=world_size
             let expected = (world_size * (world_size + 1) / 2) as f32;
