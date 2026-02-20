@@ -6,26 +6,6 @@ use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
 
-/// AllReduce dispatcher: selects the best algorithm based on message size
-/// and world size.
-///
-/// Selection strategy:
-/// - `< 8 KB`:         halving-doubling (latency-optimal, O(log N) steps)
-/// - `8 KB – 8 MiB`:   ring (N ≤ 8) or halving-doubling (N > 8)
-/// - `> 8 MiB`:        pipelined ring (bandwidth-optimal)
-///
-/// # Safety
-/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
-pub async unsafe fn ring_allreduce(
-    client: &NexarClient,
-    ptr: u64,
-    count: usize,
-    dtype: DataType,
-    op: ReduceOp,
-) -> Result<()> {
-    unsafe { ring_allreduce_with_tag(client, ptr, count, dtype, op, None).await }
-}
-
 // Algorithm thresholds are read from client.config().large_msg_bytes
 // and client.config().ring_max_world at runtime.
 

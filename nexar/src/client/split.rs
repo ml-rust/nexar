@@ -42,13 +42,15 @@ impl NexarClient {
         // stack-allocated buffers.
         let send_ptr = my_info.as_ptr() as u64;
         let recv_ptr = all_info.as_mut_ptr() as u64;
+        let tag = self.next_collective_tag();
         unsafe {
-            crate::collective::ring_allgather(
+            crate::collective::ring_allgather_with_tag(
                 self,
                 send_ptr,
                 recv_ptr,
                 16, // 16 bytes per rank
                 crate::types::DataType::U8,
+                Some(tag),
             )
             .await?;
         }

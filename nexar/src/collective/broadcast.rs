@@ -9,20 +9,6 @@ use futures::future::try_join_all;
 /// Threshold: use flat broadcast for small worlds, tree broadcast for larger.
 const TREE_BROADCAST_THRESHOLD: u32 = 4;
 
-/// Tree broadcast from `root` to all other ranks (O(log N) rounds).
-///
-/// # Safety
-/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
-pub async unsafe fn tree_broadcast(
-    client: &NexarClient,
-    ptr: u64,
-    count: usize,
-    dtype: DataType,
-    root: Rank,
-) -> Result<()> {
-    unsafe { tree_broadcast_with_tag(client, ptr, count, dtype, root, None).await }
-}
-
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn tree_broadcast_with_tag(
     client: &NexarClient,

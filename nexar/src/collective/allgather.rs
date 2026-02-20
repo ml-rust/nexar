@@ -5,22 +5,6 @@ use crate::collective::helpers::{
 use crate::error::{NexarError, Result};
 use crate::types::DataType;
 
-/// Ring-allgather: each rank contributes `count` elements, result is
-/// `count * world_size` elements on every rank (concatenated in rank order).
-///
-/// # Safety
-/// - `send_ptr` must point to at least `count * dtype.size_in_bytes()` bytes.
-/// - `recv_ptr` must point to at least `count * world_size * dtype.size_in_bytes()` bytes.
-pub async unsafe fn ring_allgather(
-    client: &NexarClient,
-    send_ptr: u64,
-    recv_ptr: u64,
-    count: usize,
-    dtype: DataType,
-) -> Result<()> {
-    unsafe { ring_allgather_with_tag(client, send_ptr, recv_ptr, count, dtype, None).await }
-}
-
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn ring_allgather_with_tag(
     client: &NexarClient,

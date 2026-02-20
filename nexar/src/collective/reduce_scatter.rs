@@ -6,25 +6,6 @@ use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
 
-/// Ring reduce-scatter: reduce across all ranks, each rank gets a different
-/// slice of the result.
-///
-/// # Safety
-/// - `send_ptr` must point to at least `count * world_size * dtype.size_in_bytes()` bytes.
-/// - `recv_ptr` must point to at least `count * dtype.size_in_bytes()` bytes.
-pub async unsafe fn ring_reduce_scatter(
-    client: &NexarClient,
-    send_ptr: u64,
-    recv_ptr: u64,
-    count: usize,
-    dtype: DataType,
-    op: ReduceOp,
-) -> Result<()> {
-    unsafe {
-        ring_reduce_scatter_with_tag(client, send_ptr, recv_ptr, count, dtype, op, None).await
-    }
-}
-
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn ring_reduce_scatter_with_tag(
     client: &NexarClient,

@@ -12,32 +12,6 @@ use crate::collective::helpers::CollectiveTag;
 use crate::error::Result;
 use crate::types::{DataType, IoVec, ReduceOp};
 
-/// Fuse multiple `(ptr, element_count)` entries into one allreduce.
-///
-/// Each entry's pointer must refer to device memory accessible via the client's
-/// `DeviceAdapter`. The entries are gathered into a flat host buffer, allreduced
-/// as one contiguous tensor, then scattered back to the original locations.
-///
-/// For `CpuAdapter`, the pointers are regular host pointers.
-///
-/// # Host-only limitation
-/// This implementation performs the allreduce on a host-allocated buffer.
-/// It is **only correct with `CpuAdapter`**. GPU users should use
-/// `nexar-nccl`'s on-device bucketed operations instead — passing GPU
-/// pointers here will cause incorrect behavior or a crash.
-///
-/// # Safety
-/// Each `(ptr, count)` entry must point to at least `count * dtype.size_in_bytes()`
-/// valid bytes on the device.
-pub async unsafe fn allreduce_bucketed(
-    client: &NexarClient,
-    entries: &[(u64, usize)],
-    dtype: DataType,
-    op: ReduceOp,
-) -> Result<()> {
-    unsafe { allreduce_bucketed_with_tag(client, entries, dtype, op, None).await }
-}
-
 /// Tagged variant for non-blocking bucketed allreduce.
 pub(crate) async unsafe fn allreduce_bucketed_with_tag(
     client: &NexarClient,

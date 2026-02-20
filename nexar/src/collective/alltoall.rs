@@ -5,21 +5,6 @@ use crate::collective::helpers::{
 use crate::error::{NexarError, Result};
 use crate::types::DataType;
 
-/// All-to-all: each rank sends a distinct chunk to every other rank.
-///
-/// # Safety
-/// - `send_ptr` must point to at least `count * world_size * dtype.size_in_bytes()` bytes.
-/// - `recv_ptr` must point to at least `count * world_size * dtype.size_in_bytes()` bytes.
-pub async unsafe fn alltoall(
-    client: &NexarClient,
-    send_ptr: u64,
-    recv_ptr: u64,
-    count: usize,
-    dtype: DataType,
-) -> Result<()> {
-    unsafe { alltoall_with_tag(client, send_ptr, recv_ptr, count, dtype, None).await }
-}
-
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn alltoall_with_tag(
     client: &NexarClient,

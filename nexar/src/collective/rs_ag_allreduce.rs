@@ -15,27 +15,6 @@ use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
 
-/// Allreduce via reduce-scatter followed by allgather.
-///
-/// Equivalent to `ring_allreduce` but decomposed into two phases:
-/// 1. Reduce-scatter: each rank gets its portion of the reduced elements
-/// 2. Allgather: reconstruct the full reduced tensor on all ranks
-///
-/// Handles arbitrary `count` values — remainder elements are distributed
-/// across the first `count % world_size` ranks (one extra element each).
-///
-/// # Safety
-/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
-pub async unsafe fn rs_ag_allreduce(
-    client: &NexarClient,
-    ptr: u64,
-    count: usize,
-    dtype: DataType,
-    op: ReduceOp,
-) -> Result<()> {
-    unsafe { rs_ag_allreduce_with_tag(client, ptr, count, dtype, op, None).await }
-}
-
 /// Tagged variant for non-blocking RS+AG allreduce.
 pub(crate) async unsafe fn rs_ag_allreduce_with_tag(
     client: &NexarClient,

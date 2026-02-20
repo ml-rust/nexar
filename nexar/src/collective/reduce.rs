@@ -6,21 +6,6 @@ use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, Rank, ReduceOp};
 
-/// Tree reduce: reduce data from all ranks to a single root rank.
-///
-/// # Safety
-/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
-pub async unsafe fn tree_reduce(
-    client: &NexarClient,
-    ptr: u64,
-    count: usize,
-    dtype: DataType,
-    op: ReduceOp,
-    root: Rank,
-) -> Result<()> {
-    unsafe { tree_reduce_with_tag(client, ptr, count, dtype, op, root, None).await }
-}
-
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn tree_reduce_with_tag(
     client: &NexarClient,

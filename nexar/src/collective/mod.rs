@@ -15,22 +15,10 @@ mod rs_ag_allreduce;
 mod scan;
 mod scatter;
 
-pub use allgather::ring_allgather;
-pub use allreduce::ring_allreduce;
-pub use alltoall::alltoall;
 pub use barrier::barrier;
-pub use broadcast::tree_broadcast;
-pub use bucketed_allreduce::allreduce_bucketed;
 pub use compressed_allreduce::ring_allreduce_compressed;
-pub use gather::gather;
 pub use handle::{CollectiveGroup, CollectiveHandle};
-pub use reduce::tree_reduce;
-pub use reduce_scatter::ring_reduce_scatter;
-pub use rs_ag_allreduce::rs_ag_allreduce;
-pub use scan::{exclusive_scan, inclusive_scan};
-pub use scatter::scatter;
 
-// Tagged variants for non-blocking collectives (crate-internal).
 pub(crate) use allgather::ring_allgather_with_tag;
 pub(crate) use allreduce::ring_allreduce_with_tag;
 pub(crate) use alltoall::alltoall_with_tag;

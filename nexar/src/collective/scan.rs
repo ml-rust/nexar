@@ -6,22 +6,6 @@ use crate::error::{NexarError, Result};
 use crate::reduce::{identity_slice, reduce_slice};
 use crate::types::{DataType, ReduceOp};
 
-/// Inclusive prefix scan (prefix sum) across all ranks.
-///
-/// After completion, rank `i` holds the reduction of ranks 0..=i.
-///
-/// # Safety
-/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
-pub async unsafe fn inclusive_scan(
-    client: &NexarClient,
-    ptr: u64,
-    count: usize,
-    dtype: DataType,
-    op: ReduceOp,
-) -> Result<()> {
-    unsafe { inclusive_scan_with_tag(client, ptr, count, dtype, op, None).await }
-}
-
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn inclusive_scan_with_tag(
     client: &NexarClient,
@@ -90,23 +74,6 @@ pub(crate) async unsafe fn inclusive_scan_with_tag(
     unsafe { client.adapter().receive_to_device(&buf, ptr)? };
 
     Ok(())
-}
-
-/// Exclusive prefix scan across all ranks.
-///
-/// After completion, rank `i` holds the reduction of ranks `0..i` (exclusive).
-/// Rank 0 receives the identity element.
-///
-/// # Safety
-/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
-pub async unsafe fn exclusive_scan(
-    client: &NexarClient,
-    ptr: u64,
-    count: usize,
-    dtype: DataType,
-    op: ReduceOp,
-) -> Result<()> {
-    unsafe { exclusive_scan_with_tag(client, ptr, count, dtype, op, None).await }
 }
 
 /// Tagged variant for non-blocking collectives.

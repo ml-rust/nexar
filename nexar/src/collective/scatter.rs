@@ -6,24 +6,6 @@ use crate::error::Result;
 use crate::types::{DataType, Rank};
 use futures::future::try_join_all;
 
-/// Scatter: root distributes `count * world_size` elements, sending chunk `i`
-/// to rank `i`. Inverse of gather.
-///
-/// # Safety
-/// - `send_ptr` must be valid for at least `count * world_size * dtype.size_in_bytes()` bytes
-///   on the root rank.
-/// - `recv_ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes on all ranks.
-pub async unsafe fn scatter(
-    client: &NexarClient,
-    send_ptr: u64,
-    recv_ptr: u64,
-    count: usize,
-    dtype: DataType,
-    root: Rank,
-) -> Result<()> {
-    unsafe { scatter_with_tag(client, send_ptr, recv_ptr, count, dtype, root, None).await }
-}
-
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn scatter_with_tag(
     client: &NexarClient,

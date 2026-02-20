@@ -392,6 +392,7 @@ impl NexarClient {
         residual: *mut u8,
         residual_len: usize,
     ) -> CollectiveHandle {
+        let tag = self.next_collective_tag();
         let client = Arc::clone(self);
         let mut residual_buf = SendMutSlice {
             ptr: residual,
@@ -409,6 +410,7 @@ impl NexarClient {
                     op,
                     compressor.as_ref(),
                     residual_slice,
+                    Some(tag),
                 )
                 .await
             }

@@ -65,28 +65,6 @@ pub(crate) fn collective_timeout(client: &NexarClient) -> Duration {
 /// `Some(tag)` for tagged transport (concurrent collectives).
 pub(crate) type CollectiveTag = Option<u64>;
 
-/// Send bytes to a peer with timeout, wrapping errors as `CollectiveFailed`.
-///
-/// If `tag` is `Some`, uses tagged transport; otherwise uses the best
-/// available transport (RDMA if attached, QUIC fallback).
-pub(crate) async fn collective_send(
-    client: &NexarClient,
-    dest: Rank,
-    data: &[u8],
-    operation: &'static str,
-) -> Result<()> {
-    collective_send_with_tag(client, dest, data, operation, None).await
-}
-
-/// Receive bytes from a peer with timeout, wrapping errors as `CollectiveFailed`.
-pub(crate) async fn collective_recv(
-    client: &NexarClient,
-    src: Rank,
-    operation: &'static str,
-) -> Result<PooledBuf> {
-    collective_recv_with_tag(client, src, operation, None).await
-}
-
 /// Send bytes to a peer with optional tag and timeout.
 pub(crate) async fn collective_send_with_tag(
     client: &NexarClient,

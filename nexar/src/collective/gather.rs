@@ -6,23 +6,6 @@ use crate::error::Result;
 use crate::types::{DataType, Rank};
 use futures::future::try_join_all;
 
-/// Gather: root collects `count` elements from each rank.
-///
-/// # Safety
-/// - `send_ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes on all ranks.
-/// - `recv_ptr` must be valid for at least `count * world_size * dtype.size_in_bytes()` bytes
-///   on the root rank.
-pub async unsafe fn gather(
-    client: &NexarClient,
-    send_ptr: u64,
-    recv_ptr: u64,
-    count: usize,
-    dtype: DataType,
-    root: Rank,
-) -> Result<()> {
-    unsafe { gather_with_tag(client, send_ptr, recv_ptr, count, dtype, root, None).await }
-}
-
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn gather_with_tag(
     client: &NexarClient,
