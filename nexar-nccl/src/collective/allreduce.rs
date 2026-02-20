@@ -41,7 +41,7 @@ pub async unsafe fn hierarchical_allreduce(
 
     // Use the optimized reduce-scatter path only when the count is evenly
     // divisible by local_world AND the message is large enough to benefit.
-    if msg_size >= SMALL_MSG_THRESHOLD && count % local_world == 0 {
+    if msg_size >= SMALL_MSG_THRESHOLD && count.is_multiple_of(local_world) {
         unsafe { large_msg_allreduce(comm, ptr, count, dtype, op).await }
     } else {
         unsafe { small_msg_allreduce(comm, ptr, count, dtype, op).await }

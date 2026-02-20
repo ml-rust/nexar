@@ -54,21 +54,21 @@ pub async unsafe fn hierarchical_reduce(
     comm.synchronize()?;
 
     // Step 2: Leads run nexar reduce to the root's node lead.
-    if comm.is_lead() {
-        if let Some(inter) = comm.inter_node() {
-            let root_on_our_node = topo.local_ranks.contains(&root);
-            let inter_root = if root_on_our_node {
-                inter.rank()
-            } else {
-                find_node_for_rank(root, topo, comm.world_size())
-            };
+    if comm.is_lead()
+        && let Some(inter) = comm.inter_node()
+    {
+        let root_on_our_node = topo.local_ranks.contains(&root);
+        let inter_root = if root_on_our_node {
+            inter.rank()
+        } else {
+            find_node_for_rank(root, topo, comm.world_size())
+        };
 
-            unsafe {
-                inter
-                    .reduce(ptr, count, dtype, op, inter_root)
-                    .await
-                    .map_err(NcclCommError::Nexar)?;
-            }
+        unsafe {
+            inter
+                .reduce(ptr, count, dtype, op, inter_root)
+                .await
+                .map_err(NcclCommError::Nexar)?;
         }
     }
 

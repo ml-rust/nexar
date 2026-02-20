@@ -69,23 +69,23 @@ pub async unsafe fn hierarchical_broadcast(
     }
 
     // Step 2: Inter-node broadcast from the root's node lead to all other leads.
-    if comm.is_lead() {
-        if let Some(inter) = comm.inter_node() {
-            // Find which inter-node rank corresponds to the root's node.
-            let root_inter_rank = if root_on_our_node {
-                // We are on the root's node — our lead is the inter-node root.
-                inter.rank()
-            } else {
-                // Find which node the root is on by checking rank ranges.
-                find_node_for_rank(root, topo, comm.world_size())
-            };
+    if comm.is_lead()
+        && let Some(inter) = comm.inter_node()
+    {
+        // Find which inter-node rank corresponds to the root's node.
+        let root_inter_rank = if root_on_our_node {
+            // We are on the root's node — our lead is the inter-node root.
+            inter.rank()
+        } else {
+            // Find which node the root is on by checking rank ranges.
+            find_node_for_rank(root, topo, comm.world_size())
+        };
 
-            unsafe {
-                inter
-                    .broadcast(ptr, count, dtype, root_inter_rank)
-                    .await
-                    .map_err(NcclCommError::Nexar)?;
-            }
+        unsafe {
+            inter
+                .broadcast(ptr, count, dtype, root_inter_rank)
+                .await
+                .map_err(NcclCommError::Nexar)?;
         }
     }
 

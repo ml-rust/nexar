@@ -53,19 +53,19 @@ pub async unsafe fn hierarchical_allgather(
     comm.synchronize()?;
 
     // Step 2: Leads exchange inter-node data via nexar allgather.
-    if comm.is_lead() {
-        if let Some(inter) = comm.inter_node() {
-            // Each lead has local_world * count elements (its node's data).
-            // Allgather across leads to fill the entire recv_ptr.
-            let node_chunk_count = local_world * count;
-            let node_chunk_ptr = recv_ptr + node_recv_offset;
+    if comm.is_lead()
+        && let Some(inter) = comm.inter_node()
+    {
+        // Each lead has local_world * count elements (its node's data).
+        // Allgather across leads to fill the entire recv_ptr.
+        let node_chunk_count = local_world * count;
+        let node_chunk_ptr = recv_ptr + node_recv_offset;
 
-            unsafe {
-                inter
-                    .all_gather(node_chunk_ptr, recv_ptr, node_chunk_count, dtype)
-                    .await
-                    .map_err(NcclCommError::Nexar)?;
-            }
+        unsafe {
+            inter
+                .all_gather(node_chunk_ptr, recv_ptr, node_chunk_count, dtype)
+                .await
+                .map_err(NcclCommError::Nexar)?;
         }
     }
 

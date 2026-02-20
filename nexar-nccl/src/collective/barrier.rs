@@ -23,10 +23,10 @@ pub async fn hierarchical_barrier(comm: &HierarchicalComm) -> Result<()> {
     }
 
     // Step 2: Lead ranks run nexar barrier across nodes.
-    if comm.is_lead() {
-        if let Some(inter) = comm.inter_node() {
-            inter.barrier().await.map_err(NcclCommError::Nexar)?;
-        }
+    if comm.is_lead()
+        && let Some(inter) = comm.inter_node()
+    {
+        inter.barrier().await.map_err(NcclCommError::Nexar)?;
     }
 
     // Step 3: Intra-node sync again to ensure non-lead ranks wait for the
