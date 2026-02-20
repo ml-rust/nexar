@@ -57,7 +57,10 @@ pub async unsafe fn hierarchical_broadcast(
             .local_ranks
             .iter()
             .position(|&r| r == root)
-            .expect("root confirmed in local_ranks");
+            .ok_or_else(|| NcclCommError::InvalidRank {
+                rank: root,
+                world_size: comm.world_size(),
+            })?;
         unsafe {
             comm.nccl()
                 .broadcast_inplace(ptr, count, dtype, root_local)?;

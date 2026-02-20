@@ -127,9 +127,11 @@ pub async unsafe fn discover_topology(client: &NexarClient) -> Result<NodeTopolo
                 .filter(|(_, h)| h == host)
                 .map(|(r, _)| *r)
                 .min()
-                .expect("each host has at least one rank")
+                .ok_or_else(|| NcclCommError::Topology {
+                    reason: format!("no ranks found for host {host}"),
+                })
         })
-        .collect();
+        .collect::<Result<Vec<Rank>>>()?;
 
     Ok(NodeTopology {
         hostname,

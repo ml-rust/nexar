@@ -44,6 +44,23 @@ impl BulkTransport for RdmaBulkTransport {
         let rdma = Arc::clone(&self.0);
         Box::pin(async move { send_via_rdma(rdma, data).await })
     }
+
+    fn recv_bulk<'a>(&'a self, expected_size: usize) -> BoxFuture<'a, Result<Vec<u8>>> {
+        let rdma = Arc::clone(&self.0);
+        Box::pin(async move {
+            let mut pooled = rdma.pool.checkout()?;
+            tokio::task::spawn_blocking(move || {
+                let mut conn = rdma
+                    .conn
+                    .lock()
+                    .map_err(|e| NexarError::DeviceError(format!("RDMA lock poisoned: {e}")))?;
+                conn.recv(pooled.mr_mut(), 0)?;
+                Ok(pooled[..expected_size].to_vec())
+            })
+            .await
+            .map_err(|e| NexarError::DeviceError(format!("RDMA spawn_blocking: {e}")))?
+        })
+    }
 }
 
 impl PeerConnectionRdmaExt for PeerConnection {
