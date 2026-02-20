@@ -169,6 +169,69 @@ impl NexarClient {
         }
     }
 
+    /// Create a client with a user-supplied buffer pool.
+    ///
+    /// Use this to share a single pool across multiple clients, or to pass
+    /// a pool built with [`PoolBuilder`] for custom tier sizing.
+    pub fn new_with_pool(
+        rank: Rank,
+        world_size: u32,
+        peers: HashMap<Rank, PeerConnection>,
+        adapter: Arc<dyn DeviceAdapter>,
+        pool: Arc<BufferPool>,
+    ) -> Self {
+        Self::new_with_pool_and_config(
+            rank,
+            world_size,
+            peers,
+            adapter,
+            pool,
+            NexarConfig::from_env(),
+        )
+    }
+
+    /// Create a client with a user-supplied buffer pool and config.
+    pub fn new_with_pool_and_config(
+        rank: Rank,
+        world_size: u32,
+        peers: HashMap<Rank, PeerConnection>,
+        adapter: Arc<dyn DeviceAdapter>,
+        pool: Arc<BufferPool>,
+        config: NexarConfig,
+    ) -> Self {
+        let mut peer_arcs: HashMap<Rank, Arc<PeerConnection>> = HashMap::new();
+        let mut routers: HashMap<Rank, PeerRouter> = HashMap::new();
+        let mut handles = Vec::new();
+
+        for (peer_rank, peer_conn) in peers {
+            let conn_clone = peer_conn.conn.clone();
+            let (router, handle) = PeerRouter::spawn(peer_rank, conn_clone, Arc::clone(&pool));
+            peer_arcs.insert(peer_rank, Arc::new(peer_conn));
+            routers.insert(peer_rank, router);
+            handles.push(handle);
+        }
+
+        Self {
+            rank,
+            world_size,
+            comm_id: 0,
+            peers: peer_arcs,
+            routers,
+            raw_recv: RawRecvSource::Router,
+            _router_handles: handles,
+            adapter,
+            _pool: pool,
+            barrier_epoch: AtomicU64::new(0),
+            rpc_registry: Arc::new(RwLock::new(RpcRegistry::new())),
+            rpc_req_id: AtomicU64::new(0),
+            split_generation: AtomicU64::new(0),
+            rank_map: HashMap::new(),
+            collective_tag: AtomicU64::new(1),
+            tagged_receivers: Mutex::new(HashMap::new()),
+            config: Arc::new(config),
+        }
+    }
+
     /// Get the next barrier epoch (per-client counter).
     pub(crate) fn next_barrier_epoch(&self) -> u64 {
         self.barrier_epoch.fetch_add(1, Ordering::Relaxed)

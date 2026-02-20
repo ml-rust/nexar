@@ -22,7 +22,7 @@ pub use device::{CpuAdapter, DeviceAdapter};
 pub use error::{NexarError, Result};
 pub use memory::{BufferPtr, BufferRef, Device, GlobalPtr, Host, MemorySpace};
 pub use protocol::NexarMessage;
-pub use transport::buffer_pool::PoolProfile;
+pub use transport::buffer_pool::{BufferPool, PoolBuilder, PoolProfile, TierConfig};
 pub use transport::{
     BulkTransport, PeerConnection, TaggedBulkTransport, TcpBulkTransport, TransportListener,
 };
