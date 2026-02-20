@@ -181,6 +181,9 @@ impl NexarClient {
             collective_tag: AtomicU64::new(1),
             tagged_receivers: tokio::sync::Mutex::new(HashMap::new()),
             config: Arc::clone(&self.config),
+            failure_tx: Arc::clone(&self.failure_tx),
+            failure_rx: self.failure_rx.clone(),
+            _monitor_handle: None, // Split clients share the parent's monitor
         })
     }
 }

@@ -1,3 +1,4 @@
+use crate::cluster::HealthMonitor;
 use crate::config::NexarConfig;
 use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
@@ -11,10 +12,17 @@ use crate::types::{Priority, Rank};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 /// Cached tagged receiver map: (original_rank, tag) -> shared Receiver.
 type TaggedReceiverMap = HashMap<(Rank, u64), Arc<Mutex<tokio::sync::mpsc::Receiver<PooledBuf>>>>;
+
+/// Return type for [`NexarClient::spawn_monitor`]: (failure_tx, failure_rx, monitor_handle).
+type MonitorParts = (
+    Arc<watch::Sender<Vec<Rank>>>,
+    watch::Receiver<Vec<Rank>>,
+    tokio::task::JoinHandle<()>,
+);
 
 /// Abstraction over raw byte receive channels.
 /// Default clients use the router's raw lane; split clients use per-comm_id channels.
@@ -88,6 +96,12 @@ pub struct NexarClient {
     pub(super) tagged_receivers: Mutex<TaggedReceiverMap>,
     /// Runtime configuration (timeouts, thresholds).
     pub(crate) config: Arc<NexarConfig>,
+    /// Sender for failure notifications (health monitor writes here).
+    pub(super) failure_tx: Arc<watch::Sender<Vec<Rank>>>,
+    /// Receiver for failure notifications (application reads here).
+    pub(super) failure_rx: watch::Receiver<Vec<Rank>>,
+    /// Heartbeat monitor background task handle (kept alive for the client's lifetime).
+    pub(super) _monitor_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl NexarClient {
@@ -148,6 +162,8 @@ impl NexarClient {
             handles.push(handle);
         }
 
+        let (failure_tx, failure_rx, monitor_handle) = Self::spawn_monitor(&config, &peer_arcs);
+
         Self {
             rank,
             world_size,
@@ -166,6 +182,9 @@ impl NexarClient {
             collective_tag: AtomicU64::new(1), // Start at 1; tag 0 is reserved for untagged
             tagged_receivers: Mutex::new(HashMap::new()),
             config: Arc::new(config),
+            failure_tx,
+            failure_rx,
+            _monitor_handle: Some(monitor_handle),
         }
     }
 
@@ -211,6 +230,8 @@ impl NexarClient {
             handles.push(handle);
         }
 
+        let (failure_tx, failure_rx, monitor_handle) = Self::spawn_monitor(&config, &peer_arcs);
+
         Self {
             rank,
             world_size,
@@ -229,7 +250,24 @@ impl NexarClient {
             collective_tag: AtomicU64::new(1),
             tagged_receivers: Mutex::new(HashMap::new()),
             config: Arc::new(config),
+            failure_tx,
+            failure_rx,
+            _monitor_handle: Some(monitor_handle),
         }
+    }
+
+    /// Spawn the heartbeat monitor and return the failure notification channels.
+    fn spawn_monitor(
+        config: &NexarConfig,
+        peers: &HashMap<Rank, Arc<PeerConnection>>,
+    ) -> MonitorParts {
+        let (failure_tx, failure_rx) = watch::channel(Vec::new());
+        let failure_tx = Arc::new(failure_tx);
+        let monitor =
+            HealthMonitor::with_timeout(config.heartbeat_interval, config.heartbeat_timeout);
+        let monitor_peers: Vec<_> = peers.iter().map(|(r, p)| (*r, Arc::clone(p))).collect();
+        let handle = monitor.start_monitoring(monitor_peers, Arc::clone(&failure_tx));
+        (failure_tx, failure_rx, handle)
     }
 
     /// Get the next barrier epoch (per-client counter).
@@ -516,6 +554,14 @@ impl NexarClient {
                 "expected Data message, got {other:?}"
             ))),
         }
+    }
+
+    /// Get a receiver that notifies when peers are detected as failed.
+    ///
+    /// The receiver yields the current list of dead peer ranks whenever it changes.
+    /// Use `.changed().await` to wait for the next failure event.
+    pub fn failure_watch(&self) -> watch::Receiver<Vec<Rank>> {
+        self.failure_rx.clone()
     }
 
     /// Get the next unique collective tag for non-blocking collectives.

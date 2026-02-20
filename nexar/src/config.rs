@@ -56,6 +56,12 @@ pub struct NexarConfig {
     /// where N is the world size. This limit prevents OOM crashes on large
     /// clusters. Set to `0` to disable the check.
     pub compressed_allreduce_max_bytes: usize,
+
+    /// Interval between heartbeat probes sent to each peer.
+    pub heartbeat_interval: Duration,
+
+    /// Duration after which a peer with no heartbeat response is considered dead.
+    pub heartbeat_timeout: Duration,
 }
 
 impl Default for NexarConfig {
@@ -70,6 +76,8 @@ impl Default for NexarConfig {
             enable_tcp_bulk_sidecar: true,
             encrypt_bulk_transport: true,
             compressed_allreduce_max_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
+            heartbeat_interval: Duration::from_secs(1),
+            heartbeat_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -87,6 +95,8 @@ impl NexarConfig {
     /// - `NEXAR_ENABLE_TCP_BULK_SIDECAR` (default: true, set to "0" or "false" to disable)
     /// - `NEXAR_ENCRYPT_BULK_TRANSPORT` (default: true, set to "0" or "false" to disable)
     /// - `NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES` (default: 4 GiB, set to "0" to disable)
+    /// - `NEXAR_HEARTBEAT_INTERVAL_SECS` (default: 1)
+    /// - `NEXAR_HEARTBEAT_TIMEOUT_SECS` (default: 5)
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
@@ -130,6 +140,17 @@ impl NexarConfig {
             && let Ok(n) = v.parse::<usize>()
         {
             cfg.compressed_allreduce_max_bytes = n;
+        }
+
+        if let Ok(v) = std::env::var("NEXAR_HEARTBEAT_INTERVAL_SECS")
+            && let Ok(s) = v.parse::<u64>()
+        {
+            cfg.heartbeat_interval = Duration::from_secs(s);
+        }
+        if let Ok(v) = std::env::var("NEXAR_HEARTBEAT_TIMEOUT_SECS")
+            && let Ok(s) = v.parse::<u64>()
+        {
+            cfg.heartbeat_timeout = Duration::from_secs(s);
         }
 
         cfg
