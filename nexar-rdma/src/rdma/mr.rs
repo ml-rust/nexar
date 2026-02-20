@@ -61,54 +61,172 @@ impl Drop for RdmaMr {
     }
 }
 
-/// Poll a Mutex-protected CQ until at least one completion arrives, with timeout.
+/// Send-safe wrapper around a raw CQ pointer.
 ///
-/// Uses tiered backoff: spin for 1000 iterations, then sleep 10µs for 4000
-/// iterations, then sleep 100µs until timeout.
-pub(crate) fn poll_until_complete(
-    cq_lock: &std::sync::Mutex<()>,
-    cq: *mut ibverbs_sys::ibv_cq,
+/// RDMA CQ pointers are thread-safe (completions can be polled from any thread).
+/// This wrapper allows them to cross `.await` points in `Send` futures.
+#[derive(Clone, Copy)]
+pub(crate) struct SendCq(*mut ibverbs_sys::ibv_cq);
+
+unsafe impl Send for SendCq {}
+unsafe impl Sync for SendCq {}
+
+impl SendCq {
+    pub(crate) fn new(cq: *mut ibverbs_sys::ibv_cq) -> Self {
+        Self(cq)
+    }
+
+    fn raw(self) -> *mut ibverbs_sys::ibv_cq {
+        self.0
+    }
+}
+
+/// Wait for a CQ completion using the completion channel's file descriptor.
+///
+/// Uses `tokio::io::unix::AsyncFd` to sleep on the completion channel's fd
+/// instead of spin-polling. This avoids exhausting Tokio's blocking thread
+/// pool under high RDMA concurrency.
+///
+/// Flow:
+/// 1. `ibv_req_notify_cq` — arm the CQ to signal the completion channel
+/// 2. `AsyncFd::readable()` — yield to Tokio until the fd is readable
+/// 3. `ibv_get_cq_event` — consume the event (blocks briefly, but fd is ready)
+/// 4. `ibv_ack_cq_events` — acknowledge so the channel doesn't stall
+/// 5. Poll the CQ for the actual work completion
+pub(crate) async fn wait_for_completion(
+    cq: SendCq,
+    channel: &tokio::io::unix::AsyncFd<CompChannelFd>,
     timeout: std::time::Duration,
 ) -> Result<()> {
-    let start = std::time::Instant::now();
-    let mut iter = 0u32;
+    // Arm the CQ notification before checking for existing completions.
+    req_notify(cq)?;
+
+    // Check if a completion is already available (avoid blocking if work
+    // completed between post and notify arm).
+    if let Some(result) = try_poll_cq(cq)? {
+        return result;
+    }
+
+    // Wait for the completion channel fd to become readable.
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        {
-            let _guard = cq_lock
-                .lock()
-                .map_err(|e| NexarError::device(format!("CQ lock poisoned: {e}")))?;
-            unsafe {
-                let mut wc = ibverbs_sys::ibv_wc::default();
-                let ctx = (*cq).context;
-                let ops = &mut (*ctx).ops;
-                let n = ops.poll_cq.as_mut().expect("poll_cq missing")(cq, 1, &mut wc as *mut _);
-                if n < 0 {
-                    return Err(NexarError::device("RDMA: poll_cq failed"));
+        let wait = tokio::time::timeout_at(deadline, channel.readable());
+        match wait.await {
+            Ok(Ok(mut guard)) => {
+                // fd is readable — consume the event.
+                guard.clear_ready();
+                drain_cq_events(cq, channel)?;
+
+                // Poll the CQ for the work completion.
+                if let Some(result) = try_poll_cq(cq)? {
+                    return result;
                 }
-                if n > 0 {
-                    if let Some((status, vendor_err)) = wc.error() {
-                        return Err(NexarError::device(format!(
-                            "RDMA: work completion failed (status={status:?}, vendor_err={vendor_err}, wr_id={})",
-                            wc.wr_id()
-                        )));
-                    }
-                    return Ok(());
-                }
+
+                // Spurious wakeup or event for a different WR. Re-arm and retry.
+                req_notify(cq)?;
+            }
+            Ok(Err(e)) => {
+                return Err(NexarError::device(format!("RDMA: AsyncFd error: {e}")));
+            }
+            Err(_) => {
+                return Err(NexarError::device(format!(
+                    "RDMA: CQ event timed out after {}ms",
+                    timeout.as_millis()
+                )));
             }
         }
-        if start.elapsed() > timeout {
+    }
+}
+
+/// Arm CQ notification via the ibverbs ops table.
+fn req_notify(cq: SendCq) -> Result<()> {
+    unsafe {
+        let raw = cq.raw();
+        let ctx = (*raw).context;
+        let ops = &mut (*ctx).ops;
+        let rc = ops.req_notify_cq.as_mut().expect("req_notify_cq missing")(raw, 0);
+        if rc != 0 {
             return Err(NexarError::device(format!(
-                "RDMA: CQ poll timed out after {}ms",
-                timeout.as_millis()
+                "RDMA: ibv_req_notify_cq failed (rc={rc})"
             )));
         }
-        if iter < 1000 {
-            std::hint::spin_loop();
-        } else if iter < 5000 {
-            std::thread::sleep(std::time::Duration::from_micros(10));
-        } else {
-            std::thread::sleep(std::time::Duration::from_micros(100));
+    }
+    Ok(())
+}
+
+/// Try to poll one completion from the CQ without blocking.
+///
+/// Returns:
+/// - `Ok(Some(Ok(())))` — completion found, success
+/// - `Ok(Some(Err(...)))` — completion found, error
+/// - `Ok(None)` — no completion available yet
+fn try_poll_cq(cq: SendCq) -> Result<Option<Result<()>>> {
+    unsafe {
+        let raw = cq.raw();
+        let mut wc = ibverbs_sys::ibv_wc::default();
+        let ctx = (*raw).context;
+        let ops = &mut (*ctx).ops;
+        let n = ops.poll_cq.as_mut().expect("poll_cq missing")(raw, 1, &mut wc as *mut _);
+        if n < 0 {
+            return Err(NexarError::device("RDMA: poll_cq failed"));
         }
-        iter = iter.saturating_add(1);
+        if n > 0 {
+            if let Some((status, vendor_err)) = wc.error() {
+                return Ok(Some(Err(NexarError::device(format!(
+                    "RDMA: work completion failed (status={status:?}, vendor_err={vendor_err}, wr_id={})",
+                    wc.wr_id()
+                )))));
+            }
+            return Ok(Some(Ok(())));
+        }
+        Ok(None)
+    }
+}
+
+/// Consume all pending CQ events from the completion channel.
+fn drain_cq_events(cq: SendCq, channel: &tokio::io::unix::AsyncFd<CompChannelFd>) -> Result<()> {
+    unsafe {
+        let mut ev_cq: *mut ibverbs_sys::ibv_cq = std::ptr::null_mut();
+        let mut ev_ctx: *mut std::ffi::c_void = std::ptr::null_mut();
+        let rc = ibverbs_sys::ibv_get_cq_event(channel.get_ref().raw, &mut ev_cq, &mut ev_ctx);
+        if rc != 0 {
+            return Err(NexarError::device("RDMA: ibv_get_cq_event failed"));
+        }
+        ibverbs_sys::ibv_ack_cq_events(cq.raw(), 1);
+    }
+    Ok(())
+}
+
+/// Wrapper around a raw comp channel fd for use with `AsyncFd`.
+pub(crate) struct CompChannelFd {
+    raw: *mut ibverbs_sys::ibv_comp_channel,
+}
+
+unsafe impl Send for CompChannelFd {}
+unsafe impl Sync for CompChannelFd {}
+
+impl std::os::unix::io::AsRawFd for CompChannelFd {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        unsafe { (*self.raw).fd }
+    }
+}
+
+impl CompChannelFd {
+    pub(crate) fn new(channel: *mut ibverbs_sys::ibv_comp_channel) -> Result<Self> {
+        if channel.is_null() {
+            return Err(NexarError::device("RDMA: null comp_channel"));
+        }
+        // Set the fd to non-blocking so AsyncFd works correctly.
+        unsafe {
+            let fd = (*channel).fd;
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 {
+                return Err(NexarError::device("RDMA: fcntl F_GETFL failed"));
+            }
+            if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                return Err(NexarError::device("RDMA: fcntl F_SETFL O_NONBLOCK failed"));
+            }
+        }
+        Ok(Self { raw: channel })
     }
 }

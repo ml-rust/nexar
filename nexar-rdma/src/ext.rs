@@ -3,7 +3,9 @@
 use crate::rdma::{RdmaConnection, RdmaMemoryPool};
 use futures::future::BoxFuture;
 use nexar::PeerConnection;
-use nexar::error::{NexarError, Result};
+#[cfg(feature = "gpudirect")]
+use nexar::error::NexarError;
+use nexar::error::Result;
 use nexar::transport::BulkTransport;
 use std::sync::Arc;
 
@@ -14,7 +16,7 @@ use std::sync::Arc;
 pub(crate) struct RdmaStateHolder(pub Arc<RdmaState>);
 
 pub(crate) struct RdmaState {
-    pub conn: std::sync::Mutex<RdmaConnection>,
+    pub conn: tokio::sync::Mutex<RdmaConnection>,
     pub pool: Arc<RdmaMemoryPool>,
 }
 
@@ -50,16 +52,9 @@ impl BulkTransport for RdmaBulkTransport {
         let rdma = Arc::clone(&self.0);
         Box::pin(async move {
             let mut pooled = rdma.pool.checkout()?;
-            tokio::task::spawn_blocking(move || {
-                let mut conn = rdma
-                    .conn
-                    .lock()
-                    .map_err(|e| NexarError::device(format!("RDMA lock poisoned: {e}")))?;
-                conn.recv(pooled.mr_mut(), 0)?;
-                Ok(pooled[..expected_size].to_vec())
-            })
-            .await
-            .map_err(|e| NexarError::device(format!("RDMA spawn_blocking: {e}")))?
+            let mut conn = rdma.conn.lock().await;
+            conn.recv_async(pooled.mr_mut(), 0).await?;
+            Ok(pooled[..expected_size].to_vec())
         })
     }
 }
@@ -67,7 +62,7 @@ impl BulkTransport for RdmaBulkTransport {
 impl PeerConnectionRdmaExt for PeerConnection {
     fn set_rdma(&self, rdma_conn: RdmaConnection, pool: Arc<RdmaMemoryPool>) {
         let state = Arc::new(RdmaState {
-            conn: std::sync::Mutex::new(rdma_conn),
+            conn: tokio::sync::Mutex::new(rdma_conn),
             pool,
         });
         // Ignore errors — set_rdma is best-effort setup.
@@ -93,16 +88,8 @@ async fn send_via_rdma(rdma: Arc<RdmaState>, data: &[u8]) -> Result<()> {
     let len = data.len();
     pooled[..len].copy_from_slice(data);
 
-    tokio::task::spawn_blocking(move || {
-        let mut conn = rdma
-            .conn
-            .lock()
-            .map_err(|e| NexarError::device(format!("RDMA lock poisoned: {e}")))?;
-        conn.send(pooled.mr_mut(), 0)?;
-        Ok::<(), NexarError>(())
-    })
-    .await
-    .map_err(|e| NexarError::device(format!("RDMA spawn_blocking: {e}")))?
+    let mut conn = rdma.conn.lock().await;
+    conn.send_async(pooled.mr_mut(), 0).await
 }
 
 #[cfg(feature = "gpudirect")]
@@ -114,7 +101,7 @@ mod gpudirect_ext {
     pub(crate) struct GpuDirectStateHolder(pub Arc<GpuDirectState>);
 
     pub(crate) struct GpuDirectState {
-        pub qp: std::sync::Mutex<GpuDirectQp>,
+        pub qp: tokio::sync::Mutex<GpuDirectQp>,
         pub pool: Arc<GpuDirectPool>,
     }
 
@@ -149,7 +136,7 @@ mod gpudirect_ext {
     impl PeerConnectionGpuDirectExt for PeerConnection {
         fn set_gpudirect(&self, qp: GpuDirectQp, pool: Arc<GpuDirectPool>) {
             let _ = self.add_extension(GpuDirectStateHolder(Arc::new(GpuDirectState {
-                qp: std::sync::Mutex::new(qp),
+                qp: tokio::sync::Mutex::new(qp),
                 pool,
             })));
         }

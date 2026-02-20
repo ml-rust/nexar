@@ -8,7 +8,7 @@
 //! 3. Exchange `RdmaEndpoint` via QUIC control channel.
 //! 4. `PreparedRdmaConnection::complete()` — handshake to RTS.
 
-use super::mr::{RdmaMr, poll_until_complete};
+use super::mr::{CompChannelFd, RdmaMr, SendCq, wait_for_completion};
 use ibverbs_sys::{
     ibv_access_flags, ibv_qp_attr_mask, ibv_qp_state, ibv_qp_type, ibv_send_flags, ibv_wr_opcode,
 };
@@ -17,6 +17,7 @@ use nexar::types::Rank;
 use std::os::raw::c_int;
 use std::ptr;
 use std::sync::Arc;
+use tokio::io::unix::AsyncFd;
 
 /// Endpoint data exchanged between peers to complete an RDMA QP handshake.
 #[derive(Debug, Clone, Copy)]
@@ -51,16 +52,19 @@ impl RdmaEndpoint {
 
 /// Shared per-device RDMA resources.
 ///
-/// Owns the ibverbs `Context`, protection domain, and completion queues.
-/// All RDMA connections created from this context share these resources.
+/// Owns the ibverbs `Context`, protection domain, completion queues, and
+/// completion channels. All RDMA connections created from this context
+/// share these resources.
 pub struct RdmaContext {
     ctx: *mut ibverbs_sys::ibv_context,
     pd: *mut ibverbs_sys::ibv_pd,
     send_cq: *mut ibverbs_sys::ibv_cq,
     recv_cq: *mut ibverbs_sys::ibv_cq,
-    // Mutexes for serializing CQ poll access (CQs are shared across connections)
-    send_cq_lock: std::sync::Mutex<()>,
-    recv_cq_lock: std::sync::Mutex<()>,
+    send_channel: *mut ibverbs_sys::ibv_comp_channel,
+    recv_channel: *mut ibverbs_sys::ibv_comp_channel,
+    /// AsyncFd wrappers for event-driven CQ completion (non-blocking).
+    send_async_fd: AsyncFd<CompChannelFd>,
+    recv_async_fd: AsyncFd<CompChannelFd>,
 }
 
 unsafe impl Send for RdmaContext {}
@@ -70,7 +74,8 @@ impl RdmaContext {
     /// Open an RDMA device and allocate shared resources.
     ///
     /// `device_index` selects which RDMA device to use (default: first).
-    /// Creates a protection domain and two CQs (256 entries each).
+    /// Creates a protection domain, two completion channels, and two CQs
+    /// (256 entries each) bound to those channels for event-driven completion.
     pub fn new(device_index: Option<usize>) -> Result<Self> {
         unsafe {
             let mut num_devices: c_int = 0;
@@ -101,28 +106,94 @@ impl RdmaContext {
                 return Err(NexarError::device("RDMA: ibv_alloc_pd failed"));
             }
 
-            let send_cq = ibverbs_sys::ibv_create_cq(ctx, 256, ptr::null_mut(), ptr::null_mut(), 0);
+            // Create completion channels for event-driven CQ notification.
+            let send_channel = ibverbs_sys::ibv_create_comp_channel(ctx);
+            if send_channel.is_null() {
+                ibverbs_sys::ibv_dealloc_pd(pd);
+                ibverbs_sys::ibv_close_device(ctx);
+                return Err(NexarError::device(
+                    "RDMA: ibv_create_comp_channel (send) failed",
+                ));
+            }
+
+            let recv_channel = ibverbs_sys::ibv_create_comp_channel(ctx);
+            if recv_channel.is_null() {
+                ibverbs_sys::ibv_destroy_comp_channel(send_channel);
+                ibverbs_sys::ibv_dealloc_pd(pd);
+                ibverbs_sys::ibv_close_device(ctx);
+                return Err(NexarError::device(
+                    "RDMA: ibv_create_comp_channel (recv) failed",
+                ));
+            }
+
+            // Create CQs bound to their completion channels.
+            let send_cq = ibverbs_sys::ibv_create_cq(ctx, 256, ptr::null_mut(), send_channel, 0);
             if send_cq.is_null() {
+                ibverbs_sys::ibv_destroy_comp_channel(recv_channel);
+                ibverbs_sys::ibv_destroy_comp_channel(send_channel);
                 ibverbs_sys::ibv_dealloc_pd(pd);
                 ibverbs_sys::ibv_close_device(ctx);
                 return Err(NexarError::device("RDMA: ibv_create_cq (send) failed"));
             }
 
-            let recv_cq = ibverbs_sys::ibv_create_cq(ctx, 256, ptr::null_mut(), ptr::null_mut(), 1);
+            let recv_cq = ibverbs_sys::ibv_create_cq(ctx, 256, ptr::null_mut(), recv_channel, 1);
             if recv_cq.is_null() {
                 ibverbs_sys::ibv_destroy_cq(send_cq);
+                ibverbs_sys::ibv_destroy_comp_channel(recv_channel);
+                ibverbs_sys::ibv_destroy_comp_channel(send_channel);
                 ibverbs_sys::ibv_dealloc_pd(pd);
                 ibverbs_sys::ibv_close_device(ctx);
                 return Err(NexarError::device("RDMA: ibv_create_cq (recv) failed"));
             }
+
+            // Wrap comp channel fds for async I/O (sets O_NONBLOCK).
+            let send_fd = CompChannelFd::new(send_channel).map_err(|e| {
+                ibverbs_sys::ibv_destroy_cq(recv_cq);
+                ibverbs_sys::ibv_destroy_cq(send_cq);
+                ibverbs_sys::ibv_destroy_comp_channel(recv_channel);
+                ibverbs_sys::ibv_destroy_comp_channel(send_channel);
+                ibverbs_sys::ibv_dealloc_pd(pd);
+                ibverbs_sys::ibv_close_device(ctx);
+                e
+            })?;
+            let recv_fd = CompChannelFd::new(recv_channel).map_err(|e| {
+                ibverbs_sys::ibv_destroy_cq(recv_cq);
+                ibverbs_sys::ibv_destroy_cq(send_cq);
+                ibverbs_sys::ibv_destroy_comp_channel(recv_channel);
+                ibverbs_sys::ibv_destroy_comp_channel(send_channel);
+                ibverbs_sys::ibv_dealloc_pd(pd);
+                ibverbs_sys::ibv_close_device(ctx);
+                e
+            })?;
+
+            let send_async_fd = AsyncFd::new(send_fd).map_err(|e| {
+                ibverbs_sys::ibv_destroy_cq(recv_cq);
+                ibverbs_sys::ibv_destroy_cq(send_cq);
+                ibverbs_sys::ibv_destroy_comp_channel(recv_channel);
+                ibverbs_sys::ibv_destroy_comp_channel(send_channel);
+                ibverbs_sys::ibv_dealloc_pd(pd);
+                ibverbs_sys::ibv_close_device(ctx);
+                NexarError::device(format!("RDMA: AsyncFd (send) failed: {e}"))
+            })?;
+            let recv_async_fd = AsyncFd::new(recv_fd).map_err(|e| {
+                ibverbs_sys::ibv_destroy_cq(recv_cq);
+                ibverbs_sys::ibv_destroy_cq(send_cq);
+                ibverbs_sys::ibv_destroy_comp_channel(recv_channel);
+                ibverbs_sys::ibv_destroy_comp_channel(send_channel);
+                ibverbs_sys::ibv_dealloc_pd(pd);
+                ibverbs_sys::ibv_close_device(ctx);
+                NexarError::device(format!("RDMA: AsyncFd (recv) failed: {e}"))
+            })?;
 
             Ok(Self {
                 ctx,
                 pd,
                 send_cq,
                 recv_cq,
-                send_cq_lock: std::sync::Mutex::new(()),
-                recv_cq_lock: std::sync::Mutex::new(()),
+                send_channel,
+                recv_channel,
+                send_async_fd,
+                recv_async_fd,
             })
         }
     }
@@ -233,6 +304,12 @@ impl Drop for RdmaContext {
             }
             if !self.recv_cq.is_null() {
                 ibverbs_sys::ibv_destroy_cq(self.recv_cq);
+            }
+            if !self.send_channel.is_null() {
+                ibverbs_sys::ibv_destroy_comp_channel(self.send_channel);
+            }
+            if !self.recv_channel.is_null() {
+                ibverbs_sys::ibv_destroy_comp_channel(self.recv_channel);
             }
             if !self.pd.is_null() {
                 ibverbs_sys::ibv_dealloc_pd(self.pd);
@@ -361,11 +438,83 @@ pub struct RdmaConnection {
 unsafe impl Send for RdmaConnection {}
 unsafe impl Sync for RdmaConnection {}
 
-/// Default timeout for CQ polling (5 seconds).
+/// Default timeout for CQ completion events (5 seconds).
 const CQ_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl RdmaConnection {
-    /// Post an RDMA send and wait for completion.
+    /// Post an RDMA send and wait for completion via event-driven notification.
+    pub async fn send_async(&mut self, mr: &RdmaMr, wr_id: u64) -> Result<()> {
+        unsafe {
+            let mut sge: ibverbs_sys::ibv_sge = std::mem::zeroed();
+            sge.addr = mr.ptr as u64;
+            sge.length = mr.size as u32;
+            sge.lkey = mr.lkey();
+
+            let mut wr: ibverbs_sys::ibv_send_wr = std::mem::zeroed();
+            wr.wr_id = wr_id;
+            wr.sg_list = &mut sge;
+            wr.num_sge = 1;
+            wr.opcode = ibv_wr_opcode::IBV_WR_SEND;
+            wr.send_flags = ibv_send_flags::IBV_SEND_SIGNALED.0;
+
+            let mut bad_wr: *mut ibverbs_sys::ibv_send_wr = ptr::null_mut();
+            let ctx = (*self.qp).context;
+            let ops = &mut (*ctx).ops;
+            let rc = ops.post_send.as_mut().expect("post_send missing")(
+                self.qp,
+                &mut wr as *mut _,
+                &mut bad_wr as *mut _,
+            );
+            if rc != 0 {
+                return Err(NexarError::device(format!(
+                    "RDMA: post_send failed (rc={rc})"
+                )));
+            }
+        }
+        wait_for_completion(
+            SendCq::new(self.send_cq),
+            &self.ctx.send_async_fd,
+            CQ_POLL_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Post an RDMA receive and wait for completion via event-driven notification.
+    pub async fn recv_async(&mut self, mr: &RdmaMr, wr_id: u64) -> Result<()> {
+        unsafe {
+            let mut sge: ibverbs_sys::ibv_sge = std::mem::zeroed();
+            sge.addr = mr.ptr as u64;
+            sge.length = mr.size as u32;
+            sge.lkey = mr.lkey();
+
+            let mut wr: ibverbs_sys::ibv_recv_wr = std::mem::zeroed();
+            wr.wr_id = wr_id;
+            wr.sg_list = &mut sge;
+            wr.num_sge = 1;
+
+            let mut bad_wr: *mut ibverbs_sys::ibv_recv_wr = ptr::null_mut();
+            let ctx = (*self.qp).context;
+            let ops = &mut (*ctx).ops;
+            let rc = ops.post_recv.as_mut().expect("post_recv missing")(
+                self.qp,
+                &mut wr as *mut _,
+                &mut bad_wr as *mut _,
+            );
+            if rc != 0 {
+                return Err(NexarError::device(format!(
+                    "RDMA: post_recv failed (rc={rc})"
+                )));
+            }
+        }
+        wait_for_completion(
+            SendCq::new(self.recv_cq),
+            &self.ctx.recv_async_fd,
+            CQ_POLL_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Post an RDMA send and wait for completion (blocking, for non-async contexts).
     pub fn send(&mut self, mr: &RdmaMr, wr_id: u64) -> Result<()> {
         unsafe {
             let mut sge: ibverbs_sys::ibv_sge = std::mem::zeroed();
@@ -394,10 +543,10 @@ impl RdmaConnection {
                 )));
             }
         }
-        self.wait_send_completion()
+        self.wait_send_completion_sync()
     }
 
-    /// Post an RDMA receive and wait for completion.
+    /// Post an RDMA receive and wait for completion (blocking, for non-async contexts).
     pub fn recv(&mut self, mr: &RdmaMr, wr_id: u64) -> Result<()> {
         unsafe {
             let mut sge: ibverbs_sys::ibv_sge = std::mem::zeroed();
@@ -424,15 +573,58 @@ impl RdmaConnection {
                 )));
             }
         }
-        self.wait_recv_completion()
+        self.wait_recv_completion_sync()
     }
 
-    fn wait_send_completion(&self) -> Result<()> {
-        poll_until_complete(&self.ctx.send_cq_lock, self.send_cq, CQ_POLL_TIMEOUT)
+    /// Synchronous CQ poll with tiered backoff (for blocking `send`/`recv`).
+    fn poll_until_complete_sync(
+        cq: *mut ibverbs_sys::ibv_cq,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        let mut iter = 0u32;
+        loop {
+            unsafe {
+                let mut wc = ibverbs_sys::ibv_wc::default();
+                let ctx = (*cq).context;
+                let ops = &mut (*ctx).ops;
+                let n = ops.poll_cq.as_mut().expect("poll_cq missing")(cq, 1, &mut wc as *mut _);
+                if n < 0 {
+                    return Err(NexarError::device("RDMA: poll_cq failed"));
+                }
+                if n > 0 {
+                    if let Some((status, vendor_err)) = wc.error() {
+                        return Err(NexarError::device(format!(
+                            "RDMA: work completion failed (status={status:?}, vendor_err={vendor_err}, wr_id={})",
+                            wc.wr_id()
+                        )));
+                    }
+                    return Ok(());
+                }
+            }
+            if start.elapsed() > timeout {
+                return Err(NexarError::device(format!(
+                    "RDMA: CQ poll timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            }
+            if iter < 1000 {
+                std::hint::spin_loop();
+            } else if iter < 5000 {
+                std::thread::sleep(std::time::Duration::from_micros(10));
+            } else {
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+            iter = iter.saturating_add(1);
+        }
     }
 
-    fn wait_recv_completion(&self) -> Result<()> {
-        poll_until_complete(&self.ctx.recv_cq_lock, self.recv_cq, CQ_POLL_TIMEOUT)
+    fn wait_send_completion_sync(&self) -> Result<()> {
+        Self::poll_until_complete_sync(self.send_cq, CQ_POLL_TIMEOUT)
+    }
+
+    fn wait_recv_completion_sync(&self) -> Result<()> {
+        Self::poll_until_complete_sync(self.recv_cq, CQ_POLL_TIMEOUT)
     }
 }
 

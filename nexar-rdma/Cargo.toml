@@ -13,6 +13,7 @@ categories = ["network-programming"]
 [dependencies]
 nexar = { path = "../nexar" }
 ibverbs-sys = { version = "0.3" }
+libc = "0.2"
 crossbeam-queue = { workspace = true }
 futures = "0.3"
 tokio = { workspace = true }
