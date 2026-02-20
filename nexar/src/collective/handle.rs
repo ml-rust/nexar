@@ -6,28 +6,43 @@ use tokio::task::JoinHandle;
 ///
 /// The collective runs asynchronously in a spawned task. Call `wait()` to
 /// block until it completes, or check `is_finished()` to poll.
+///
+/// If dropped without calling `wait()`, the background task is aborted to
+/// prevent writes to potentially-freed memory.
 pub struct CollectiveHandle {
-    inner: JoinHandle<Result<()>>,
+    inner: Option<JoinHandle<Result<()>>>,
 }
 
 impl CollectiveHandle {
     /// Spawn a future as a non-blocking collective and return a handle.
     pub(crate) fn spawn(fut: impl Future<Output = Result<()>> + Send + 'static) -> Self {
         Self {
-            inner: tokio::spawn(fut),
+            inner: Some(tokio::spawn(fut)),
         }
     }
 
     /// Wait for the collective to complete and propagate any error.
-    pub async fn wait(self) -> Result<()> {
-        self.inner.await.map_err(|e| {
+    pub async fn wait(mut self) -> Result<()> {
+        let handle = self
+            .inner
+            .take()
+            .expect("CollectiveHandle already consumed");
+        handle.await.map_err(|e| {
             crate::error::NexarError::transport(format!("collective task panicked: {e}"))
         })?
     }
 
     /// Check if the collective has finished (non-blocking).
     pub fn is_finished(&self) -> bool {
-        self.inner.is_finished()
+        self.inner.as_ref().map_or(true, |h| h.is_finished())
+    }
+}
+
+impl Drop for CollectiveHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.inner {
+            handle.abort();
+        }
     }
 }
 
