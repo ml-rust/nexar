@@ -2,6 +2,17 @@ use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
 use crate::protocol::codec::encode_message;
 use crate::types::{Priority, Rank};
+use futures::future::BoxFuture;
+
+/// Trait for bulk transport accelerators (e.g. RDMA).
+///
+/// Implementations are attached to `PeerConnection` via the extension slot
+/// and used by `send_raw_best_effort` to accelerate data transfers.
+/// Recv stays QUIC-only for now (RDMA recv needs pre-posted buffers).
+pub trait BulkTransport: Send + Sync + 'static {
+    /// Send raw bytes via the accelerated transport.
+    fn send_bulk<'a>(&'a self, data: &'a [u8]) -> BoxFuture<'a, Result<()>>;
+}
 
 /// Stream type tag: first byte on every QUIC uni stream.
 /// Allows the router to dispatch streams to the correct channel without ambiguity.
@@ -101,6 +112,23 @@ impl PeerConnection {
             .finish()
             .map_err(|e| NexarError::Transport(format!("finish stream: {e}")))?;
         Ok(())
+    }
+
+    /// Send raw bytes using the best available transport.
+    ///
+    /// Tries any attached `BulkTransport` accelerator first (e.g. RDMA),
+    /// falling back to QUIC if none is available or if the accelerated send fails.
+    pub async fn send_raw_best_effort(&self, data: &[u8]) -> Result<()> {
+        // Extract the BulkTransport Arc and drop the extension guard before .await.
+        let bulk: Option<std::sync::Arc<dyn BulkTransport>> = self
+            .extension::<std::sync::Arc<dyn BulkTransport>>()
+            .map(|b| std::sync::Arc::clone(&*b));
+        if let Some(bulk) = bulk {
+            if bulk.send_bulk(data).await.is_ok() {
+                return Ok(());
+            }
+        }
+        self.send_raw(data).await
     }
 
     /// Get the remote address of this connection.

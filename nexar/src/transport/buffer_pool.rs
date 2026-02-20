@@ -75,33 +75,13 @@ impl BufferPool {
             PoolProfile::Training => (32, 16, 4),
             PoolProfile::Inference => (16, 4, 0),
         };
-
-        let small = ArrayQueue::new(SMALL_POOL_SIZE);
-        for _ in 0..SMALL_POOL_SIZE {
-            let _ = small.push(Vec::with_capacity(SMALL_BUF_CAPACITY));
-        }
-
-        let large = ArrayQueue::new(large_count.max(1));
-        for _ in 0..large_count {
-            let _ = large.push(Vec::with_capacity(LARGE_BUF_CAPACITY));
-        }
-
-        let huge = ArrayQueue::new(huge_count.max(1));
-        for _ in 0..huge_count {
-            let _ = huge.push(Vec::with_capacity(HUGE_BUF_CAPACITY));
-        }
-
-        let giant = ArrayQueue::new(giant_count.max(1));
-        for _ in 0..giant_count {
-            let _ = giant.push(Vec::with_capacity(GIANT_BUF_CAPACITY));
-        }
-
-        Arc::new(Self {
-            small,
-            large,
-            huge,
-            giant,
-        })
+        Self::with_tier_sizes(
+            SMALL_POOL_SIZE,
+            SMALL_BUF_CAPACITY,
+            large_count,
+            huge_count,
+            giant_count,
+        )
     }
 
     /// Create a pool with custom small tier sizes (primarily for testing).
@@ -109,29 +89,29 @@ impl BufferPool {
     /// Large, huge, and giant tiers use minimal sizes to avoid excessive
     /// memory usage in test environments.
     pub fn with_config(small_pool_size: usize, small_buf_cap: usize) -> Arc<Self> {
-        let small = ArrayQueue::new(small_pool_size);
-        for _ in 0..small_pool_size {
-            let _ = small.push(Vec::with_capacity(small_buf_cap));
-        }
+        Self::with_tier_sizes(small_pool_size, small_buf_cap, 4, 2, 1)
+    }
 
-        let large = ArrayQueue::new(4);
-        for _ in 0..4 {
-            let _ = large.push(Vec::with_capacity(LARGE_BUF_CAPACITY));
+    fn with_tier_sizes(
+        small_count: usize,
+        small_cap: usize,
+        large_count: usize,
+        huge_count: usize,
+        giant_count: usize,
+    ) -> Arc<Self> {
+        fn fill_tier(count: usize, capacity: usize) -> ArrayQueue<Vec<u8>> {
+            let queue = ArrayQueue::new(count.max(1));
+            for _ in 0..count {
+                let _ = queue.push(Vec::with_capacity(capacity));
+            }
+            queue
         }
-
-        let huge = ArrayQueue::new(2);
-        for _ in 0..2 {
-            let _ = huge.push(Vec::with_capacity(HUGE_BUF_CAPACITY));
-        }
-
-        let giant = ArrayQueue::new(1);
-        let _ = giant.push(Vec::with_capacity(GIANT_BUF_CAPACITY));
 
         Arc::new(Self {
-            small,
-            large,
-            huge,
-            giant,
+            small: fill_tier(small_count, small_cap),
+            large: fill_tier(large_count, LARGE_BUF_CAPACITY),
+            huge: fill_tier(huge_count, HUGE_BUF_CAPACITY),
+            giant: fill_tier(giant_count, GIANT_BUF_CAPACITY),
         })
     }
 
@@ -144,35 +124,11 @@ impl BufferPool {
     /// - `len <= 256 MiB`: giant pool
     /// - `len > 256 MiB`: allocate fresh (no pool)
     pub fn checkout(self: &Arc<Self>, len: usize) -> PooledBuf {
-        let (mut buf, tier) = if len <= SMALL_BUF_CAPACITY {
-            let buf = self
-                .small
-                .pop()
-                .unwrap_or_else(|| Vec::with_capacity(SMALL_BUF_CAPACITY));
-            (buf, PoolTier::Small)
-        } else if len <= LARGE_BUF_CAPACITY {
-            let buf = self
-                .large
-                .pop()
-                .unwrap_or_else(|| Vec::with_capacity(LARGE_BUF_CAPACITY));
-            (buf, PoolTier::Large)
-        } else if len <= HUGE_BUF_CAPACITY {
-            let buf = self
-                .huge
-                .pop()
-                .unwrap_or_else(|| Vec::with_capacity(HUGE_BUF_CAPACITY));
-            (buf, PoolTier::Huge)
-        } else if len <= GIANT_BUF_CAPACITY {
-            let buf = self
-                .giant
-                .pop()
-                .unwrap_or_else(|| Vec::with_capacity(GIANT_BUF_CAPACITY));
-            (buf, PoolTier::Giant)
-        } else {
-            // Too large for any pool — allocate fresh.
-            (Vec::with_capacity(len), PoolTier::Unpooled)
+        let (queue, tier, capacity) = self.tier_for_size(len);
+        let mut buf = match queue {
+            Some(q) => q.pop().unwrap_or_else(|| Vec::with_capacity(capacity)),
+            None => Vec::with_capacity(len),
         };
-
         buf.resize(len, 0);
         PooledBuf {
             buf: Some(buf),
@@ -181,39 +137,34 @@ impl BufferPool {
         }
     }
 
+    /// Select the pool tier for a given buffer size.
+    fn tier_for_size(&self, len: usize) -> (Option<&ArrayQueue<Vec<u8>>>, PoolTier, usize) {
+        if len <= SMALL_BUF_CAPACITY {
+            (Some(&self.small), PoolTier::Small, SMALL_BUF_CAPACITY)
+        } else if len <= LARGE_BUF_CAPACITY {
+            (Some(&self.large), PoolTier::Large, LARGE_BUF_CAPACITY)
+        } else if len <= HUGE_BUF_CAPACITY {
+            (Some(&self.huge), PoolTier::Huge, HUGE_BUF_CAPACITY)
+        } else if len <= GIANT_BUF_CAPACITY {
+            (Some(&self.giant), PoolTier::Giant, GIANT_BUF_CAPACITY)
+        } else {
+            (None, PoolTier::Unpooled, len)
+        }
+    }
+
     /// Return a buffer to the appropriate tier.
     fn return_buf(&self, mut buf: Vec<u8>, tier: PoolTier) {
-        match tier {
-            PoolTier::Small => {
-                if buf.capacity() > SMALL_BUF_CAPACITY * 4 {
-                    return;
-                }
+        let (queue, max_cap) = match tier {
+            PoolTier::Small => (Some(&self.small), SMALL_BUF_CAPACITY * 4),
+            PoolTier::Large => (Some(&self.large), LARGE_BUF_CAPACITY * 4),
+            PoolTier::Huge => (Some(&self.huge), HUGE_BUF_CAPACITY * 4),
+            PoolTier::Giant => (Some(&self.giant), GIANT_BUF_CAPACITY * 4),
+            PoolTier::Unpooled => (None, 0),
+        };
+        if let Some(q) = queue {
+            if buf.capacity() <= max_cap {
                 buf.clear();
-                let _ = self.small.push(buf);
-            }
-            PoolTier::Large => {
-                if buf.capacity() > LARGE_BUF_CAPACITY * 4 {
-                    return;
-                }
-                buf.clear();
-                let _ = self.large.push(buf);
-            }
-            PoolTier::Huge => {
-                if buf.capacity() > HUGE_BUF_CAPACITY * 4 {
-                    return;
-                }
-                buf.clear();
-                let _ = self.huge.push(buf);
-            }
-            PoolTier::Giant => {
-                if buf.capacity() > GIANT_BUF_CAPACITY * 4 {
-                    return;
-                }
-                buf.clear();
-                let _ = self.giant.push(buf);
-            }
-            PoolTier::Unpooled => {
-                // Always drop — too large to pool.
+                let _ = q.push(buf);
             }
         }
     }
@@ -378,109 +329,33 @@ mod tests {
         drop(buf2);
     }
 
-    // ---- Training profile simulation tests ----
+    /// Verify checkout/return at workload-realistic sizes for both profiles.
+    fn assert_checkout(pool: &Arc<BufferPool>, sizes: &[usize]) {
+        let bufs: Vec<_> = sizes
+            .iter()
+            .map(|&s| {
+                let b = pool.checkout(s);
+                assert_eq!(b.len(), s);
+                b
+            })
+            .collect();
+        drop(bufs);
+    }
 
-    /// Ring allreduce on 70B (112 MiB MLP gradient, DP=8 → 14 MiB chunks).
-    /// 3 concurrent pipelined layers.
     #[test]
-    fn test_concurrent_allreduce_70b() {
+    fn test_training_workload_sizes() {
         let pool = BufferPool::new();
-        let chunk_14m = 14 * 1024 * 1024;
-        let b1 = pool.checkout(chunk_14m);
-        let b2 = pool.checkout(chunk_14m);
-        let b3 = pool.checkout(chunk_14m);
-        assert_eq!(b1.len(), chunk_14m);
-        assert_eq!(b2.len(), chunk_14m);
-        assert_eq!(b3.len(), chunk_14m);
-        drop(b1);
-        drop(b2);
-        drop(b3);
+        let m = 1024 * 1024;
+        // 3 concurrent 14 MiB ring allreduce chunks, 208 MiB halving-doubling, 48 MiB broadcast.
+        assert_checkout(&pool, &[14 * m, 14 * m, 14 * m, 208 * m, 48 * m]);
     }
 
-    /// Halving-doubling allreduce on 405B MLP (416 MiB tensor, first round = 208 MiB).
     #[test]
-    fn test_halving_doubling_405b() {
-        let pool = BufferPool::new();
-        let half_416m = 208 * 1024 * 1024;
-        let buf = pool.checkout(half_416m);
-        assert_eq!(buf.len(), half_416m);
-        drop(buf);
-    }
-
-    /// Broadcast of a full 70B QKV layer (48 MiB).
-    #[test]
-    fn test_broadcast_70b_qkv() {
-        let pool = BufferPool::new();
-        let qkv_48m = 48 * 1024 * 1024;
-        let buf = pool.checkout(qkv_48m);
-        assert_eq!(buf.len(), qkv_48m);
-        drop(buf);
-    }
-
-    // ---- Inference profile simulation tests ----
-
-    /// Inference profile uses ~296 MiB instead of ~2.3 GiB.
-    #[test]
-    fn test_inference_profile_exists() {
+    fn test_inference_workload_sizes() {
         let pool = BufferPool::with_profile(PoolProfile::Inference);
-        // Should work fine for inference-sized buffers.
-        let buf = pool.checkout(16 * 1024 * 1024); // 16 MiB KV cache layer
-        assert_eq!(buf.len(), 16 * 1024 * 1024);
-        drop(buf);
-    }
-
-    /// KV cache migration: 70B has 80 layers × 16 MiB per layer (TP=8, 4K ctx).
-    /// Transferred sequentially, so only 1-2 buffers in flight.
-    #[test]
-    fn test_inference_kv_cache_70b() {
-        let pool = BufferPool::with_profile(PoolProfile::Inference);
-        let kv_layer = 16 * 1024 * 1024; // 16 MiB per layer
-        // Simulate 2 concurrent KV layer transfers (prefetch next while writing current).
-        let b1 = pool.checkout(kv_layer);
-        let b2 = pool.checkout(kv_layer);
-        assert_eq!(b1.len(), kv_layer);
-        assert_eq!(b2.len(), kv_layer);
-        drop(b1);
-        drop(b2);
-    }
-
-    /// Pipeline parallelism activation: batch=1, seq=4096, hidden=8192, bf16 = 64 MiB.
-    #[test]
-    fn test_inference_pipeline_activation() {
-        let pool = BufferPool::with_profile(PoolProfile::Inference);
-        let activation = 64 * 1024 * 1024;
-        let buf = pool.checkout(activation);
-        assert_eq!(buf.len(), activation);
-        drop(buf);
-    }
-
-    /// MoE token dispatch: 64 tokens × hidden=8192 × bf16 = 1 MiB.
-    #[test]
-    fn test_inference_moe_dispatch() {
-        let pool = BufferPool::with_profile(PoolProfile::Inference);
-        let dispatch = 1024 * 1024; // 1 MiB
-        // Multiple concurrent expert dispatches.
-        let b1 = pool.checkout(dispatch);
-        let b2 = pool.checkout(dispatch);
-        let b3 = pool.checkout(dispatch);
-        let b4 = pool.checkout(dispatch);
-        assert_eq!(b1.len(), dispatch);
-        drop(b1);
-        drop(b2);
-        drop(b3);
-        drop(b4);
-    }
-
-    /// Inference profile doesn't pre-allocate giant buffers (no gradients).
-    /// Requesting >64 MiB still works — falls through to giant/unpooled with
-    /// fresh allocation (acceptable for rare large activations).
-    #[test]
-    fn test_inference_large_activation_fallback() {
-        let pool = BufferPool::with_profile(PoolProfile::Inference);
-        // 128 MiB activation (batch=4, seq=4096, hidden=8192, bf16).
-        // Giant pool is empty in inference profile — allocates fresh.
-        let buf = pool.checkout(128 * 1024 * 1024);
-        assert_eq!(buf.len(), 128 * 1024 * 1024);
-        drop(buf);
+        let m = 1024 * 1024;
+        // 16 MiB KV layer, 2 concurrent KV transfers, 64 MiB pipeline activation,
+        // 4 concurrent 1 MiB MoE dispatches, 128 MiB large activation fallback.
+        assert_checkout(&pool, &[16 * m, 16 * m, 64 * m, m, m, m, m, 128 * m]);
     }
 }
