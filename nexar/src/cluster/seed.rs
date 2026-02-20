@@ -19,16 +19,26 @@ pub struct SeedNode {
     listener: TransportListener,
     expected_world_size: u32,
     formation_timeout: Duration,
+    /// Pre-shared cluster token. If set, workers must present this token
+    /// in their Hello message to be accepted.
+    cluster_token: Option<Vec<u8>>,
 }
 
 impl SeedNode {
     /// Create a seed node bound to the given address.
+    ///
+    /// If the `NEXAR_CLUSTER_TOKEN` environment variable is set, workers must
+    /// present the same token in their Hello message to be accepted.
     pub fn bind(addr: SocketAddr, expected_world_size: u32) -> Result<Self> {
         let listener = TransportListener::bind(addr)?;
+        let cluster_token = std::env::var("NEXAR_CLUSTER_TOKEN")
+            .ok()
+            .map(|t| t.into_bytes());
         Ok(Self {
             listener,
             expected_world_size,
             formation_timeout: Duration::from_secs(60),
+            cluster_token,
         })
     }
 
@@ -85,20 +95,20 @@ impl SeedNode {
             let (send, mut recv) = conn
                 .accept_bi()
                 .await
-                .map_err(|e| NexarError::Transport(format!("accept bi from new worker: {e}")))?;
+                .map_err(|e| NexarError::transport(format!("accept bi from new worker: {e}")))?;
 
             // Read Hello message.
             let mut header_buf = [0u8; HEADER_SIZE];
             recv.read_exact(&mut header_buf)
                 .await
-                .map_err(|e| NexarError::Transport(format!("read hello header: {e}")))?;
+                .map_err(|e| NexarError::transport(format!("read hello header: {e}")))?;
             let payload_len =
                 u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]])
                     as usize;
             let mut payload = vec![0u8; payload_len];
             recv.read_exact(&mut payload)
                 .await
-                .map_err(|e| NexarError::Transport(format!("read hello payload: {e}")))?;
+                .map_err(|e| NexarError::transport(format!("read hello payload: {e}")))?;
 
             let mut full_buf = Vec::with_capacity(HEADER_SIZE + payload_len);
             full_buf.extend_from_slice(&header_buf);
@@ -107,13 +117,20 @@ impl SeedNode {
 
             match msg {
                 NexarMessage::Hello {
-                    protocol_version, ..
+                    protocol_version,
+                    cluster_token: token,
+                    ..
                 } => {
                     if protocol_version != PROTOCOL_VERSION {
                         return Err(NexarError::ProtocolMismatch {
                             local: PROTOCOL_VERSION,
                             remote: protocol_version,
                         });
+                    }
+                    if let Some(expected) = &self.cluster_token {
+                        if token.as_slice() != expected.as_slice() {
+                            return Err(NexarError::ClusterTokenMismatch);
+                        }
                     }
                 }
                 other => {
@@ -155,7 +172,7 @@ impl SeedNode {
             let buf = encode_message(&welcome, Priority::Critical)?;
             send.write_all(&buf)
                 .await
-                .map_err(|e| NexarError::Transport(format!("send welcome to rank {rank}: {e}")))?;
+                .map_err(|e| NexarError::transport(format!("send welcome to rank {rank}: {e}")))?;
             conns.push(conn);
         }
 

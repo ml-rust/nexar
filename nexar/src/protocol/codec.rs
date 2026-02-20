@@ -70,6 +70,7 @@ mod tests {
         let msg = NexarMessage::Hello {
             protocol_version: 1,
             capabilities: 0xABCD,
+            cluster_token: vec![],
         };
         let buf = encode_message(&msg, Priority::Critical).unwrap();
         let (header, decoded) = decode_message(&buf).unwrap();

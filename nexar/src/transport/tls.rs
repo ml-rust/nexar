@@ -67,6 +67,31 @@ impl ClusterCa {
     }
 }
 
+/// Create a quinn `TransportConfig` optimized for datacenter networks.
+///
+/// Datacenter networks have low latency, high bandwidth, and minimal random
+/// packet loss — different assumptions from internet QUIC defaults.
+pub(crate) fn datacenter_transport_config() -> quinn::TransportConfig {
+    let mut config = quinn::TransportConfig::default();
+    // 256 MiB connection-level receive window (vs default ~1.5 MiB).
+    config.receive_window(quinn::VarInt::from_u32(256 * 1024 * 1024));
+    // 256 MiB send window.
+    config.send_window(256 * 1024 * 1024);
+    // 64 MiB per-stream receive window.
+    config.stream_receive_window(quinn::VarInt::from_u32(64 * 1024 * 1024));
+    // Low initial RTT estimate for datacenter (100 µs vs default 333 ms).
+    config.initial_rtt(std::time::Duration::from_micros(100));
+    // Aggressive keep-alive (datacenter links are reliable).
+    config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    // Short idle timeout.
+    config.max_idle_timeout(Some(
+        std::time::Duration::from_secs(30)
+            .try_into()
+            .expect("30s fits in IdleTimeout"),
+    ));
+    config
+}
+
 /// Generate a self-signed certificate for the seed's bootstrap listener.
 ///
 /// Used only during cluster formation (before CA exists). Workers connect
@@ -107,7 +132,9 @@ pub fn make_server_config(
     let quic_config = quinn::crypto::rustls::QuicServerConfig::try_from(Arc::new(tls_config))
         .map_err(|e| NexarError::Tls(e.to_string()))?;
 
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_config)))
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_config));
+    server_config.transport_config(Arc::new(datacenter_transport_config()));
+    Ok(server_config)
 }
 
 /// Build a `ServerConfig` with mutual TLS — requires client certs signed by the cluster CA.
@@ -137,7 +164,9 @@ pub fn make_server_config_mtls(
     let quic_config = quinn::crypto::rustls::QuicServerConfig::try_from(Arc::new(tls_config))
         .map_err(|e| NexarError::Tls(e.to_string()))?;
 
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_config)))
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_config));
+    server_config.transport_config(Arc::new(datacenter_transport_config()));
+    Ok(server_config)
 }
 
 /// Build a `ClientConfig` that skips server verification (bootstrap only).
@@ -155,7 +184,9 @@ pub fn make_bootstrap_client_config() -> Result<quinn::ClientConfig> {
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(Arc::new(tls_config))
         .map_err(|e| NexarError::Tls(e.to_string()))?;
 
-    Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+    client_config.transport_config(Arc::new(datacenter_transport_config()));
+    Ok(client_config)
 }
 
 /// Build a `ClientConfig` with mutual TLS — verifies server cert and presents client cert.
@@ -181,7 +212,9 @@ pub fn make_client_config_mtls(
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(Arc::new(tls_config))
         .map_err(|e| NexarError::Tls(e.to_string()))?;
 
-    Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
+    client_config.transport_config(Arc::new(datacenter_transport_config()));
+    Ok(client_config)
 }
 
 /// Certificate verifier that accepts any certificate.
@@ -189,6 +222,13 @@ pub fn make_client_config_mtls(
 /// **Bootstrap only** — used for the initial worker→seed connection before
 /// the worker has received CA-signed credentials. All subsequent mesh
 /// connections use proper CA-based verification.
+///
+/// # MITM mitigation
+///
+/// Since this verifier skips certificate validation, the bootstrap channel
+/// is protected by a pre-shared cluster token (`NEXAR_CLUSTER_TOKEN` env var).
+/// When set, both seed and workers must present the same token in the Hello
+/// message. An attacker intercepting the connection cannot forge the token.
 #[derive(Debug)]
 struct SkipServerVerification;
 

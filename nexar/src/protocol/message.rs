@@ -11,6 +11,9 @@ pub enum NexarMessage {
     Hello {
         protocol_version: u16,
         capabilities: u64,
+        /// Pre-shared cluster token for bootstrap authentication.
+        /// Empty = no authentication required.
+        cluster_token: Vec<u8>,
     },
 
     /// Seed's response with rank assignment, peer list, and mTLS credentials.
@@ -85,6 +88,7 @@ mod tests {
         let msg = NexarMessage::Hello {
             protocol_version: 1,
             capabilities: 0xFF,
+            cluster_token: vec![],
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
         let deserialized: NexarMessage =
@@ -114,6 +118,7 @@ mod tests {
             NexarMessage::Hello {
                 protocol_version: 1,
                 capabilities: 0,
+                cluster_token: vec![],
             },
             NexarMessage::Welcome {
                 rank: 0,
