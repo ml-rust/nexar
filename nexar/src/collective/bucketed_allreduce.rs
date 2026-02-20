@@ -50,6 +50,17 @@ pub(crate) async unsafe fn allreduce_bucketed_with_tag(
         return Ok(());
     }
 
+    if !client.adapter().supports_host_offload() {
+        return Err(crate::error::NexarError::CollectiveFailed {
+            operation: "allreduce_bucketed",
+            rank: client.rank(),
+            reason:
+                "bucketed allreduce requires a host-offload capable adapter (e.g. CpuAdapter); \
+                     GPU users should use nexar-nccl's on-device bucketed operations"
+                    .into(),
+        });
+    }
+
     let elem_size = dtype.size_in_bytes();
 
     // Build IoVec regions for gather/scatter.

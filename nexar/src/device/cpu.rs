@@ -14,6 +14,10 @@ impl CpuAdapter {
 }
 
 impl DeviceAdapter for CpuAdapter {
+    fn supports_host_offload(&self) -> bool {
+        true
+    }
+
     unsafe fn stage_for_send(&self, ptr: u64, size_bytes: usize) -> Result<Vec<u8>> {
         let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, size_bytes) };
         Ok(slice.to_vec())

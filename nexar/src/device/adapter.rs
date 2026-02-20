@@ -17,6 +17,16 @@ use crate::types::{DataType, IoVec, ReduceOp};
 /// network I/O. NCCL does the same thing internally (GPUDirect RDMA merely
 /// hides the copy in hardware).
 pub trait DeviceAdapter: Send + Sync {
+    /// Whether this adapter supports host-offloaded collectives.
+    ///
+    /// Collectives like bucketed allreduce perform the reduction on a
+    /// host-allocated buffer, which is only correct when device pointers
+    /// are host pointers (i.e. `CpuAdapter`). GPU adapters must return
+    /// `false` — callers should use on-device collective paths instead.
+    fn supports_host_offload(&self) -> bool {
+        false
+    }
+
     /// Copy from device memory to a host buffer for network send.
     ///
     /// For CPU: read directly from the pointer.
