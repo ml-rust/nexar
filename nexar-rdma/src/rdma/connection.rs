@@ -147,23 +147,21 @@ impl RdmaContext {
             }
 
             // Wrap comp channel fds for async I/O (sets O_NONBLOCK).
-            let send_fd = CompChannelFd::new(send_channel).map_err(|e| {
+            let send_fd = CompChannelFd::new(send_channel).inspect_err(|_e| {
                 ibverbs_sys::ibv_destroy_cq(recv_cq);
                 ibverbs_sys::ibv_destroy_cq(send_cq);
                 ibverbs_sys::ibv_destroy_comp_channel(recv_channel);
                 ibverbs_sys::ibv_destroy_comp_channel(send_channel);
                 ibverbs_sys::ibv_dealloc_pd(pd);
                 ibverbs_sys::ibv_close_device(ctx);
-                e
             })?;
-            let recv_fd = CompChannelFd::new(recv_channel).map_err(|e| {
+            let recv_fd = CompChannelFd::new(recv_channel).inspect_err(|_e| {
                 ibverbs_sys::ibv_destroy_cq(recv_cq);
                 ibverbs_sys::ibv_destroy_cq(send_cq);
                 ibverbs_sys::ibv_destroy_comp_channel(recv_channel);
                 ibverbs_sys::ibv_destroy_comp_channel(send_channel);
                 ibverbs_sys::ibv_dealloc_pd(pd);
                 ibverbs_sys::ibv_close_device(ctx);
-                e
             })?;
 
             let send_async_fd = AsyncFd::new(send_fd).map_err(|e| {

@@ -162,10 +162,10 @@ impl SeedNode {
                             remote: protocol_version,
                         });
                     }
-                    if let Some(expected) = &self.cluster_token {
-                        if token.as_slice() != expected.as_slice() {
-                            return Err(NexarError::ClusterTokenMismatch);
-                        }
+                    if let Some(expected) = &self.cluster_token
+                        && token.as_slice() != expected.as_slice()
+                    {
+                        return Err(NexarError::ClusterTokenMismatch);
                     }
                 }
                 other => {

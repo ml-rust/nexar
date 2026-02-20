@@ -2,7 +2,7 @@
 name = "nexar"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Distributed runtime with QUIC transport, stream-multiplexed messaging, and built-in collectives"
 license = "Apache-2.0"
 repository = "https://github.com/ml-rust/nexar"

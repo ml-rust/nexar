@@ -48,7 +48,7 @@ pub(crate) async unsafe fn rs_ag_allreduce_with_tag(
         return Ok(());
     }
 
-    if count % world != 0 {
+    if !count.is_multiple_of(world) {
         return Err(NexarError::IndivisibleCount {
             count,
             world_size: world,

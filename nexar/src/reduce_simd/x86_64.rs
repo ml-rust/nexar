@@ -1,4 +1,5 @@
 //! AVX2 and AVX-512 SIMD reduction kernels for x86_64.
+#![allow(clippy::incompatible_msrv)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

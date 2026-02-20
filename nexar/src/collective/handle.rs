@@ -56,10 +56,10 @@ impl CollectiveGroup {
     pub async fn wait_all(self) -> Result<()> {
         let mut first_err = None;
         for h in self.handles {
-            if let Err(e) = h.wait().await {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
+            if let Err(e) = h.wait().await
+                && first_err.is_none()
+            {
+                first_err = Some(e);
             }
         }
         match first_err {

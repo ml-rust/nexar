@@ -161,11 +161,11 @@ impl BufferPool {
             PoolTier::Giant => (Some(&self.giant), GIANT_BUF_CAPACITY * 4),
             PoolTier::Unpooled => (None, 0),
         };
-        if let Some(q) = queue {
-            if buf.capacity() <= max_cap {
-                buf.clear();
-                let _ = q.push(buf);
-            }
+        if let Some(q) = queue
+            && buf.capacity() <= max_cap
+        {
+            buf.clear();
+            let _ = q.push(buf);
         }
     }
 }

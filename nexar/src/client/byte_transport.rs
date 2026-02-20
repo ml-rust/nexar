@@ -55,13 +55,13 @@ impl NexarClient {
         let tagged_bulk: Option<std::sync::Arc<dyn crate::transport::TaggedBulkTransport>> = peer
             .extension::<std::sync::Arc<dyn crate::transport::TaggedBulkTransport>>()?
             .map(|b| std::sync::Arc::clone(&*b));
-        if let Some(bulk) = tagged_bulk {
-            if let Ok(data) = bulk.recv_bulk_tagged(tag, expected_size).await {
-                return Ok(PooledBuf::from_vec(
-                    data,
-                    std::sync::Arc::clone(&self._pool),
-                ));
-            }
+        if let Some(bulk) = tagged_bulk
+            && let Ok(data) = bulk.recv_bulk_tagged(tag, expected_size).await
+        {
+            return Ok(PooledBuf::from_vec(
+                data,
+                std::sync::Arc::clone(&self._pool),
+            ));
         }
         self.recv_bytes_tagged(src, tag).await
     }

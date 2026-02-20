@@ -41,12 +41,12 @@ impl ClusterMap {
 
     /// Mark a peer as dead. Bumps the epoch.
     pub fn remove_peer(&mut self, rank: Rank) -> bool {
-        if let Some(info) = self.peers.get_mut(&rank) {
-            if info.alive {
-                info.alive = false;
-                self.epoch += 1;
-                return true;
-            }
+        if let Some(info) = self.peers.get_mut(&rank)
+            && info.alive
+        {
+            info.alive = false;
+            self.epoch += 1;
+            return true;
         }
         false
     }

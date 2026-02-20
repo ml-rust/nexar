@@ -79,35 +79,35 @@ impl NexarConfig {
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
-        if let Ok(v) = std::env::var("NEXAR_COLLECTIVE_TIMEOUT_SECS") {
-            if let Ok(s) = v.parse::<u64>() {
-                cfg.collective_timeout = Duration::from_secs(s);
-            }
+        if let Ok(v) = std::env::var("NEXAR_COLLECTIVE_TIMEOUT_SECS")
+            && let Ok(s) = v.parse::<u64>()
+        {
+            cfg.collective_timeout = Duration::from_secs(s);
         }
-        if let Ok(v) = std::env::var("NEXAR_BARRIER_TIMEOUT_SECS") {
-            if let Ok(s) = v.parse::<u64>() {
-                cfg.barrier_timeout = Duration::from_secs(s);
-            }
+        if let Ok(v) = std::env::var("NEXAR_BARRIER_TIMEOUT_SECS")
+            && let Ok(s) = v.parse::<u64>()
+        {
+            cfg.barrier_timeout = Duration::from_secs(s);
         }
-        if let Ok(v) = std::env::var("NEXAR_RPC_TIMEOUT_SECS") {
-            if let Ok(s) = v.parse::<u64>() {
-                cfg.rpc_timeout = Duration::from_secs(s);
-            }
+        if let Ok(v) = std::env::var("NEXAR_RPC_TIMEOUT_SECS")
+            && let Ok(s) = v.parse::<u64>()
+        {
+            cfg.rpc_timeout = Duration::from_secs(s);
         }
-        if let Ok(v) = std::env::var("NEXAR_LARGE_MSG_BYTES") {
-            if let Ok(n) = v.parse::<usize>() {
-                cfg.large_msg_bytes = n;
-            }
+        if let Ok(v) = std::env::var("NEXAR_LARGE_MSG_BYTES")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.large_msg_bytes = n;
         }
-        if let Ok(v) = std::env::var("NEXAR_PIPELINE_SEGMENT_BYTES") {
-            if let Ok(n) = v.parse::<usize>() {
-                cfg.pipeline_segment_bytes = n;
-            }
+        if let Ok(v) = std::env::var("NEXAR_PIPELINE_SEGMENT_BYTES")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.pipeline_segment_bytes = n;
         }
-        if let Ok(v) = std::env::var("NEXAR_RING_MAX_WORLD") {
-            if let Ok(n) = v.parse::<usize>() {
-                cfg.ring_max_world = n;
-            }
+        if let Ok(v) = std::env::var("NEXAR_RING_MAX_WORLD")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.ring_max_world = n;
         }
         if let Ok(v) = std::env::var("NEXAR_ENABLE_TCP_BULK_SIDECAR") {
             cfg.enable_tcp_bulk_sidecar = v != "0" && v.to_lowercase() != "false";
