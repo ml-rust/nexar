@@ -3,23 +3,26 @@
 //! Alternative allreduce via RS→AG composition. Useful for ZeRO-style sharding
 //! where intermediate reduce-scatter results are needed, or when the two-phase
 //! decomposition maps better to the network topology.
+//!
+//! Handles arbitrary element counts (not necessarily divisible by world size)
+//! by distributing remainder elements across ranks via [`ChunkLayout`].
 
 use crate::client::NexarClient;
-use crate::collective::allgather::ring_allgather_with_tag;
-use crate::collective::helpers::CollectiveTag;
-use crate::collective::reduce_scatter::ring_reduce_scatter_with_tag;
+use crate::collective::helpers::{
+    ChunkLayout, CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
+};
 use crate::error::{NexarError, Result};
+use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
 
 /// Allreduce via reduce-scatter followed by allgather.
 ///
 /// Equivalent to `ring_allreduce` but decomposed into two phases:
-/// 1. Reduce-scatter: each rank gets `count / world` reduced elements
+/// 1. Reduce-scatter: each rank gets its portion of the reduced elements
 /// 2. Allgather: reconstruct the full reduced tensor on all ranks
 ///
-/// # Errors
-/// Returns [`NexarError::IndivisibleCount`] if `count` is not evenly
-/// divisible by the world size.
+/// Handles arbitrary `count` values — remainder elements are distributed
+/// across the first `count % world_size` ranks (one extra element each).
 ///
 /// # Safety
 /// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
@@ -43,42 +46,83 @@ pub(crate) async unsafe fn rs_ag_allreduce_with_tag(
     tag: CollectiveTag,
 ) -> Result<()> {
     let world = client.world_size() as usize;
+    let rank = client.rank() as usize;
 
     if world <= 1 {
         return Ok(());
     }
 
-    if !count.is_multiple_of(world) {
-        return Err(NexarError::IndivisibleCount {
-            count,
-            world_size: world,
-            operation: "rs_ag_allreduce",
-        });
-    }
-
     let elem_size = dtype.size_in_bytes();
-    let chunk_count = count / world;
+    let total_bytes = count * elem_size;
+    let layout = ChunkLayout::new(count, world);
 
-    // Reduce-scatter: each rank gets its chunk of the reduced result.
-    // send_ptr = ptr (full tensor), recv_ptr = temp buffer for this rank's chunk.
-    let chunk_bytes = chunk_count * elem_size;
-    let mut rs_output = vec![0u8; chunk_bytes];
-    let rs_output_ptr = rs_output.as_mut_ptr() as u64;
+    let data = unsafe { client.adapter().stage_for_send(ptr, total_bytes)? };
+    let mut buf = data;
+
+    let next = (rank + 1) % world;
+    let prev = (rank + world - 1) % world;
 
     // Use distinct tags for RS and AG phases to avoid cross-talk.
     let rs_tag = tag.map(|t| t.wrapping_mul(2));
     let ag_tag = tag.map(|t| t.wrapping_mul(2).wrapping_add(1));
 
-    unsafe {
-        ring_reduce_scatter_with_tag(client, ptr, rs_output_ptr, chunk_count, dtype, op, rs_tag)
-            .await?;
+    // Phase 1: Scatter-reduce (N-1 rounds).
+    // Same algorithm as ring_allreduce_impl phase 1, using ChunkLayout
+    // for variable-sized chunks.
+    for step in 0..(world - 1) {
+        let send_idx = (rank + world - step) % world;
+        let send_off = layout.offsets[send_idx] * elem_size;
+        let send_len = layout.chunk_count(send_idx) * elem_size;
+
+        let recv_idx = (rank + world - step - 1) % world;
+        let recv_off = layout.offsets[recv_idx] * elem_size;
+        let recv_count = layout.chunk_count(recv_idx);
+        let recv_len = recv_count * elem_size;
+
+        let send_slice = &buf[send_off..send_off + send_len];
+
+        let (_, received) = tokio::try_join!(
+            collective_send_with_tag(client, next as u32, send_slice, "rs_ag_allreduce", rs_tag),
+            collective_recv_with_tag(client, prev as u32, "rs_ag_allreduce", rs_tag),
+        )?;
+
+        if received.len() != recv_len {
+            return Err(NexarError::BufferSizeMismatch {
+                expected: recv_len,
+                actual: received.len(),
+            });
+        }
+        let dst_slice = &mut buf[recv_off..recv_off + recv_len];
+        reduce_slice(dst_slice, &received, recv_count, dtype, op)?;
     }
 
-    // Allgather: reconstruct the full reduced tensor from each rank's chunk.
-    // send_ptr = rs_output (this rank's chunk), recv_ptr = ptr (full tensor output).
-    unsafe {
-        ring_allgather_with_tag(client, rs_output_ptr, ptr, chunk_count, dtype, ag_tag).await?;
+    // Phase 2: Allgather (N-1 rounds).
+    for step in 0..(world - 1) {
+        let send_idx = (rank + world + 1 - step) % world;
+        let send_off = layout.offsets[send_idx] * elem_size;
+        let send_len = layout.chunk_count(send_idx) * elem_size;
+
+        let recv_idx = (rank + world - step) % world;
+        let recv_off = layout.offsets[recv_idx] * elem_size;
+        let recv_len = layout.chunk_count(recv_idx) * elem_size;
+
+        let send_slice = &buf[send_off..send_off + send_len];
+
+        let (_, received) = tokio::try_join!(
+            collective_send_with_tag(client, next as u32, send_slice, "rs_ag_allreduce", ag_tag),
+            collective_recv_with_tag(client, prev as u32, "rs_ag_allreduce", ag_tag),
+        )?;
+
+        if received.len() != recv_len {
+            return Err(NexarError::BufferSizeMismatch {
+                expected: recv_len,
+                actual: received.len(),
+            });
+        }
+        buf[recv_off..recv_off + recv_len].copy_from_slice(&received);
     }
+
+    unsafe { client.adapter().receive_to_device(&buf, ptr)? };
 
     Ok(())
 }

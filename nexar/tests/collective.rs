@@ -10,6 +10,7 @@ mod collective {
     mod nonblocking;
     mod reduce;
     mod rpc;
+    mod rs_ag_allreduce;
     mod scan;
     mod split;
     mod tagged;
