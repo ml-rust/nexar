@@ -97,6 +97,15 @@ pub enum Priority {
     Bulk = 2,
 }
 
+/// A region descriptor for scatter-gather (non-contiguous) transfers.
+#[derive(Debug, Clone)]
+pub struct IoVec {
+    /// Pointer to the start of this region.
+    pub ptr: u64,
+    /// Length of this region in bytes.
+    pub len: usize,
+}
+
 /// Current protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
 

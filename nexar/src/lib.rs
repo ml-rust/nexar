@@ -13,10 +13,11 @@ pub mod types;
 
 pub use client::{NexarClient, SyncClient};
 pub use cluster::{SeedNode, WorkerNode};
+pub use collective::{CollectiveGroup, CollectiveHandle};
 pub use device::{CpuAdapter, DeviceAdapter};
 pub use error::{NexarError, Result};
 pub use memory::GlobalPtr;
 pub use protocol::NexarMessage;
 pub use transport::buffer_pool::PoolProfile;
 pub use transport::{BulkTransport, PeerConnection, TransportListener};
-pub use types::{DataType, NodeId, Priority, Rank, ReduceOp};
+pub use types::{DataType, IoVec, NodeId, Priority, Rank, ReduceOp};

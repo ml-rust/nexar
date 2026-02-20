@@ -12,6 +12,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock};
 
+/// Cached tagged receiver map: (original_rank, tag) -> shared Receiver.
+type TaggedReceiverMap = HashMap<(Rank, u64), Arc<Mutex<tokio::sync::mpsc::Receiver<PooledBuf>>>>;
+
 /// Abstraction over raw byte receive channels.
 /// Default clients use the router's raw lane; split clients use per-comm_id channels.
 pub(super) enum RawRecvSource {
@@ -77,6 +80,11 @@ pub struct NexarClient {
     /// Global rank mapping: new_rank -> original_rank (for split clients).
     /// Empty for the root communicator.
     pub(super) rank_map: HashMap<Rank, Rank>,
+    /// Counter for generating unique collective tags (for non-blocking collectives).
+    pub(super) collective_tag: AtomicU64,
+    /// Cached receivers for tagged channels: (original_rank, tag) -> Receiver.
+    /// Lazily created on first `recv_bytes_tagged` call per (rank, tag) pair.
+    pub(super) tagged_receivers: Mutex<TaggedReceiverMap>,
 }
 
 impl NexarClient {
@@ -126,6 +134,8 @@ impl NexarClient {
             rpc_req_id: AtomicU64::new(0),
             split_generation: AtomicU64::new(0),
             rank_map: HashMap::new(),
+            collective_tag: AtomicU64::new(1), // Start at 1; tag 0 is reserved for untagged
+            tagged_receivers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -338,6 +348,81 @@ impl NexarClient {
         }
     }
 
+    /// Send non-contiguous data (scatter-gather) to a specific rank.
+    ///
+    /// Gathers the regions into a contiguous buffer and sends as a single message.
+    ///
+    /// # Safety
+    /// Each region's `ptr` must be valid for its `len` bytes.
+    pub async unsafe fn send_iov(
+        &self,
+        regions: &[crate::types::IoVec],
+        dest: Rank,
+        tag: u32,
+    ) -> Result<()> {
+        if dest >= self.world_size {
+            return Err(NexarError::InvalidRank {
+                rank: dest,
+                world_size: self.world_size,
+            });
+        }
+        let data = unsafe { self.adapter.stage_for_send_iov(regions)? };
+        let peer = self.peer(dest)?;
+        let msg = NexarMessage::Data {
+            tag,
+            src_rank: self.rank,
+            payload: data,
+        };
+        peer.send_message(&msg, Priority::Bulk).await
+    }
+
+    /// Receive data and scatter into non-contiguous regions.
+    ///
+    /// # Safety
+    /// Each region's `ptr` must be valid for its `len` bytes.
+    /// The total size of all regions must match the received data size.
+    pub async unsafe fn recv_iov(
+        &self,
+        regions: &[crate::types::IoVec],
+        src: Rank,
+        tag: u32,
+    ) -> Result<()> {
+        if src >= self.world_size {
+            return Err(NexarError::InvalidRank {
+                rank: src,
+                world_size: self.world_size,
+            });
+        }
+
+        let expected: usize = regions.iter().map(|r| r.len).sum();
+        let msg = self.recv_data_message(src).await?;
+
+        match msg {
+            NexarMessage::Data {
+                tag: recv_tag,
+                payload,
+                ..
+            } => {
+                if recv_tag != tag {
+                    return Err(NexarError::DecodeFailed(format!(
+                        "tag mismatch: expected {tag}, got {recv_tag}"
+                    )));
+                }
+                if payload.len() != expected {
+                    return Err(NexarError::BufferSizeMismatch {
+                        expected,
+                        actual: payload.len(),
+                    });
+                }
+                unsafe { self.adapter.receive_to_device_iov(&payload, regions)? };
+                Ok(())
+            }
+            other => Err(NexarError::DecodeFailed(format!(
+                "expected Data message, got {other:?}"
+            ))),
+        }
+    }
+
     /// Send raw bytes to a peer.
     ///
     /// Uses comm-aware send for split communicators. Always uses QUIC transport.
@@ -362,6 +447,93 @@ impl NexarClient {
             // Split communicators need comm_id tagging, QUIC only.
             peer.send_raw_comm(self.comm_id, data).await
         }
+    }
+
+    /// Send raw bytes to a peer with a u64 tag.
+    ///
+    /// Tagged sends are always via QUIC (tags are part of the wire format).
+    pub async fn send_bytes_tagged(&self, dest: Rank, tag: u64, data: &[u8]) -> Result<()> {
+        let peer = self.peer(dest)?;
+        peer.send_raw_tagged(tag, data).await
+    }
+
+    /// Send tagged bytes using the best available transport.
+    pub(crate) async fn send_bytes_tagged_best_effort(
+        &self,
+        dest: Rank,
+        tag: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        let peer = self.peer(dest)?;
+        peer.send_raw_tagged_best_effort(tag, data).await
+    }
+
+    /// Receive tagged raw bytes from a peer.
+    ///
+    /// The tag channel is lazily created and cached for the lifetime of this
+    /// (rank, tag) pair. This allows multi-round algorithms (like ring
+    /// allreduce) to use the same channel across rounds without losing
+    /// messages that arrive between rounds.
+    pub async fn recv_bytes_tagged(&self, src: Rank, tag: u64) -> Result<PooledBuf> {
+        let original_src = self.resolve_rank(src);
+        let key = (original_src, tag);
+
+        // Get or create the receiver for this (rank, tag) pair.
+        let rx_arc = {
+            let mut map = self.tagged_receivers.lock().await;
+            if let Some(rx) = map.get(&key) {
+                Arc::clone(rx)
+            } else {
+                let router = self
+                    .routers
+                    .get(&original_src)
+                    .ok_or(NexarError::UnknownPeer { rank: src })?;
+                let rx = router.register_tag(tag).await;
+                let rx_arc = Arc::new(Mutex::new(rx));
+                map.insert(key, Arc::clone(&rx_arc));
+                rx_arc
+            }
+        };
+
+        let mut rx = rx_arc.lock().await;
+        rx.recv()
+            .await
+            .ok_or(NexarError::PeerDisconnected { rank: src })
+    }
+
+    /// Get the next unique collective tag for non-blocking collectives.
+    pub(crate) fn next_collective_tag(&self) -> u64 {
+        self.collective_tag.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Receive raw bytes using the best available transport.
+    ///
+    /// Tries `BulkTransport::recv_bulk` first (e.g., RDMA), falling back to QUIC.
+    /// Only works for the default communicator (comm_id 0) and requires knowing
+    /// the expected size.
+    #[allow(dead_code)]
+    pub(crate) async fn recv_bytes_best_effort(
+        &self,
+        src: Rank,
+        expected_size: usize,
+    ) -> Result<PooledBuf> {
+        if self.comm_id == 0 {
+            let peer = self.peer(src)?;
+            // Try BulkTransport recv_bulk if available.
+            let bulk: Option<std::sync::Arc<dyn crate::transport::BulkTransport>> = peer
+                .extension::<std::sync::Arc<dyn crate::transport::BulkTransport>>()
+                .map(|b| std::sync::Arc::clone(&*b));
+            if let Some(bulk) = bulk {
+                if let Ok(data) = bulk.recv_bulk(expected_size).await {
+                    return Ok(PooledBuf::from_vec(
+                        data,
+                        std::sync::Arc::clone(&self._pool),
+                    ));
+                }
+            }
+        }
+        // Fallback to QUIC recv.
+        self.recv_bytes(src).await
     }
 
     /// Receive raw bytes from a peer.

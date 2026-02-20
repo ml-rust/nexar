@@ -78,10 +78,15 @@ impl NexarClient {
         group.sort_by_key(|&(orig_rank, k)| (k, orig_rank));
 
         let new_world_size = group.len() as u32;
-        let new_rank = group
-            .iter()
-            .position(|&(r, _)| r == rank)
-            .expect("rank must be in its own color group") as Rank;
+        let new_rank =
+            group
+                .iter()
+                .position(|&(r, _)| r == rank)
+                .ok_or(NexarError::CollectiveFailed {
+                    operation: "split",
+                    rank,
+                    reason: "rank not found in its own color group".into(),
+                })? as Rank;
 
         // Step 4: Generate a deterministic comm_id agreed upon by all ranks.
         // All ranks in this communicator advance split_generation in lockstep
@@ -158,6 +163,8 @@ impl NexarClient {
             rpc_req_id: AtomicU64::new(0),
             split_generation: AtomicU64::new(0),
             rank_map,
+            collective_tag: AtomicU64::new(1),
+            tagged_receivers: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 }

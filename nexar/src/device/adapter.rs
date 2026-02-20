@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::types::{DataType, ReduceOp};
+use crate::types::{DataType, IoVec, ReduceOp};
 
 /// Bridges device memory with nexar's network transport.
 ///
@@ -46,4 +46,39 @@ pub trait DeviceAdapter: Send + Sync {
         dtype: DataType,
         op: ReduceOp,
     ) -> Result<()>;
+
+    /// Gather multiple non-contiguous regions into a single contiguous buffer for send.
+    ///
+    /// Default implementation calls `stage_for_send` per region and concatenates.
+    ///
+    /// # Safety
+    /// Each region's `ptr` must be valid for its `len` bytes.
+    unsafe fn stage_for_send_iov(&self, regions: &[IoVec]) -> Result<Vec<u8>> {
+        let total: usize = regions.iter().map(|r| r.len).sum();
+        let mut buf = Vec::with_capacity(total);
+        for region in regions {
+            let chunk = unsafe { self.stage_for_send(region.ptr, region.len)? };
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
+    }
+
+    /// Scatter received contiguous data into multiple non-contiguous device regions.
+    ///
+    /// Default implementation calls `receive_to_device` per region from successive
+    /// slices of `data`.
+    ///
+    /// # Safety
+    /// Each region's `ptr` must be valid for its `len` bytes.
+    /// `data.len()` must equal the sum of all region lengths.
+    unsafe fn receive_to_device_iov(&self, data: &[u8], regions: &[IoVec]) -> Result<()> {
+        let mut offset = 0;
+        for region in regions {
+            unsafe {
+                self.receive_to_device(&data[offset..offset + region.len], region.ptr)?;
+            }
+            offset += region.len;
+        }
+        Ok(())
+    }
 }
