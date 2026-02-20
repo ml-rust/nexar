@@ -10,6 +10,7 @@ license = "Apache-2.0"
 repository = "https://github.com/ml-rust/nexar"
 
 [workspace.dependencies]
+nexar = { version = "0.1.0", path = "nexar" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 thiserror = "2.0"

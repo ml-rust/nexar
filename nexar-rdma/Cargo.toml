@@ -11,13 +11,13 @@ readme = "README.md"
 categories = ["network-programming"]
 
 [dependencies]
-nexar = { version = "0.1.0", path = "../nexar" }
-ibverbs-sys = { version = "0.3" }
+nexar.workspace = true
+ibverbs-sys = "0.3"
 libc = "0.2"
-crossbeam-queue = { workspace = true }
+crossbeam-queue.workspace = true
 futures = "0.3"
-tokio = { workspace = true }
-tracing = { workspace = true }
+tokio.workspace = true
+tracing.workspace = true
 
 # Optional: GPUDirect RDMA (GPU memory → NIC directly)
 cudarc = { workspace = true, optional = true }

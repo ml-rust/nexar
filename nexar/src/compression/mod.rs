@@ -16,8 +16,8 @@
 //!
 //! # Usage with collectives
 //!
-//! Use [`NexarClient::all_reduce_compressed`] (blocking) or
-//! [`NexarClient::all_reduce_compressed_nb`] (non-blocking). Both require:
+//! Use [`crate::client::NexarClient::all_reduce_compressed`] (blocking) or
+//! [`crate::client::NexarClient::all_reduce_compressed_nb`] (non-blocking). Both require:
 //!
 //! 1. A `&dyn Compressor` implementation.
 //! 2. A `residual` buffer (same size as the tensor), zero-initialized on the

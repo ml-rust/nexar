@@ -17,12 +17,12 @@ rustls = { version = "0.23", default-features = false, features = [
   "std",
 ] }
 rkyv = { version = "0.8", features = ["alloc"] }
-tokio = { workspace = true }
+tokio.workspace = true
 bytes = "1"
-thiserror = { workspace = true }
-tracing = { workspace = true }
+thiserror.workspace = true
+tracing.workspace = true
 rcgen = "0.14"
-crossbeam-queue = { workspace = true }
+crossbeam-queue.workspace = true
 futures = "0.3"
 
 [dev-dependencies]

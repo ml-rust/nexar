@@ -75,17 +75,16 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libibverbs-dev
 
-      - name: Set version from tag (if needed)
+      - name: Set version from tag
         run: |
           VERSION="${{ needs.validate-version.outputs.version }}"
           CURRENT=$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "nexar") | .version')
           if [[ "$VERSION" != "$CURRENT" ]]; then
-            # Update workspace version
+            # Update workspace.package version (first occurrence)
             sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
-            # Update nexar dep version in member crates
-            sed -i "s/nexar = { version = \"[^\"]*\"/nexar = { version = \"$VERSION\"/" nexar-rdma/Cargo.toml
-            sed -i "s/nexar = { version = \"[^\"]*\"/nexar = { version = \"$VERSION\"/" nexar-nccl/Cargo.toml
-            echo "Updated workspace version: $CURRENT -> $VERSION"
+            # Update nexar workspace dependency version
+            sed -i "s/\(nexar = { version = \"\)[^\"]*\"/\1=$VERSION\"/" Cargo.toml
+            echo "Updated all versions: $CURRENT -> $VERSION"
           else
             echo "Version already matches, no change needed"
           fi

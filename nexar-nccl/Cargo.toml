@@ -11,13 +11,13 @@ readme = "README.md"
 categories = ["network-programming"]
 
 [dependencies]
-nexar = { version = "0.1.0", path = "../nexar" }
+nexar.workspace = true
 cudarc = { workspace = true, features = ["nccl"] }
-tokio = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 gethostname = "1"
-indexmap = { workspace = true }
+indexmap.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
