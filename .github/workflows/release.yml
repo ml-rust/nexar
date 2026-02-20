@@ -72,21 +72,74 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libibverbs-dev
+
       - name: Set version from tag (if needed)
         run: |
           VERSION="${{ needs.validate-version.outputs.version }}"
           CURRENT=$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "nexar") | .version')
           if [[ "$VERSION" != "$CURRENT" ]]; then
-            sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" nexar/Cargo.toml
-            echo "Updated nexar/Cargo.toml: $CURRENT -> $VERSION"
+            # Update workspace version
+            sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+            # Update nexar dep version in member crates
+            sed -i "s/nexar = { version = \"[^\"]*\"/nexar = { version = \"$VERSION\"/" nexar-rdma/Cargo.toml
+            sed -i "s/nexar = { version = \"[^\"]*\"/nexar = { version = \"$VERSION\"/" nexar-nccl/Cargo.toml
+            echo "Updated workspace version: $CURRENT -> $VERSION"
           else
             echo "Version already matches, no change needed"
           fi
 
-      - name: Dry run
-        run: cargo publish -p nexar --dry-run --allow-dirty
+      # Publish in dependency order: nexar → nexar-rdma → nexar-nccl
+      # Skips already-published crates; polls crates.io index before next tier.
+      - name: Publish to crates.io
+        run: |
+          TIER1="nexar"
+          TIER2="nexar-rdma nexar-nccl"
 
-      - name: Publish nexar to crates.io
-        run: cargo publish -p nexar --allow-dirty
+          is_published() {
+            cargo search "$1" --limit 1 2>/dev/null | grep -q "\"$2\""
+          }
+
+          wait_for() {
+            local crate="$1" version="$2"
+            echo -n "  Waiting for $crate@$version..."
+            for i in $(seq 1 60); do
+              if is_published "$crate" "$version"; then
+                echo " ready"
+                return 0
+              fi
+              sleep 5
+            done
+            echo " timed out!"
+            return 1
+          }
+
+          publish_tier() {
+            local tier_name="$1"; shift
+            local crates=("$@")
+            local need_wait=()
+
+            echo "::group::Tier: $tier_name"
+            for crate in "${crates[@]}"; do
+              VERSION=$(cargo metadata --no-deps --format-version=1 \
+                | jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
+              if is_published "$crate" "$VERSION"; then
+                echo "  $crate@$VERSION already published — skipping"
+              else
+                echo "  Publishing $crate@$VERSION..."
+                cargo publish -p "$crate" --allow-dirty --no-verify
+                need_wait+=("$crate:$VERSION")
+              fi
+            done
+
+            for entry in "${need_wait[@]}"; do
+              wait_for "${entry%%:*}" "${entry##*:}"
+            done
+            echo "::endgroup::"
+          }
+
+          publish_tier "1 (core)"       $TIER1
+          publish_tier "2 (extensions)"  $TIER2
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -29,6 +29,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libibverbs-dev
+
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: lint
@@ -39,8 +42,22 @@ jobs:
       - name: Run clippy (nexar)
         run: cargo clippy -p nexar --all-targets -- -D warnings
 
-      - name: Build docs
+      - name: Run clippy (nexar-rdma)
+        run: cargo clippy -p nexar-rdma --all-targets -- -D warnings
+
+      # nexar-nccl uses cudarc with dynamic-loading; check (not clippy) to avoid
+      # build-script failures on runners without CUDA headers.
+      - name: Check nexar-nccl
+        run: cargo check -p nexar-nccl
+
+      - name: Build docs (nexar)
         run: cargo doc -p nexar --no-deps
+
+      - name: Build docs (nexar-rdma)
+        run: cargo doc -p nexar-rdma --no-deps
+
+      - name: Build docs (nexar-nccl)
+        run: cargo doc -p nexar-nccl --no-deps
 
       - name: Run doctests
         run: cargo test -p nexar --doc
@@ -51,6 +68,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Cross-platform tests for nexar core only.
+        # nexar-rdma requires InfiniBand hardware (libibverbs).
+        # nexar-nccl requires NVIDIA GPU + NCCL runtime.
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
