@@ -32,12 +32,12 @@ impl WorkerNode {
         // Bind a local UDP socket.
         let bind_addr: SocketAddr = "0.0.0.0:0".parse().expect("hardcoded socket addr");
         let mut endpoint = quinn::Endpoint::client(bind_addr)
-            .map_err(|e| NexarError::transport(format!("bind client: {e}")))?;
+            .map_err(|e| NexarError::transport_with_source("bind client", e))?;
         endpoint.set_default_client_config(client_config);
 
         let conn = endpoint
             .connect(seed_addr, "localhost")
-            .map_err(|e| NexarError::transport(format!("connect to seed: {e}")))?
+            .map_err(|e| NexarError::transport_with_source("connect to seed", e))?
             .await
             .map_err(|e| NexarError::ConnectionFailed {
                 rank: 0,
@@ -48,7 +48,7 @@ impl WorkerNode {
         let (mut send, mut recv) = conn
             .open_bi()
             .await
-            .map_err(|e| NexarError::transport(format!("open bi to seed: {e}")))?;
+            .map_err(|e| NexarError::transport_with_source("open bi to seed", e))?;
 
         let cluster_token = std::env::var("NEXAR_CLUSTER_TOKEN")
             .map(|t| t.into_bytes())
@@ -61,20 +61,20 @@ impl WorkerNode {
         let buf = encode_message(&hello, Priority::Critical)?;
         send.write_all(&buf)
             .await
-            .map_err(|e| NexarError::transport(format!("send hello: {e}")))?;
+            .map_err(|e| NexarError::transport_with_source("send hello", e))?;
 
         // Read Welcome response.
         let mut header_buf = [0u8; HEADER_SIZE];
         recv.read_exact(&mut header_buf)
             .await
-            .map_err(|e| NexarError::transport(format!("read welcome header: {e}")))?;
+            .map_err(|e| NexarError::transport_with_source("read welcome header", e))?;
         let payload_len =
             u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]])
                 as usize;
         let mut payload = vec![0u8; payload_len];
         recv.read_exact(&mut payload)
             .await
-            .map_err(|e| NexarError::transport(format!("read welcome payload: {e}")))?;
+            .map_err(|e| NexarError::transport_with_source("read welcome payload", e))?;
 
         let mut full_buf = Vec::with_capacity(HEADER_SIZE + payload_len);
         full_buf.extend_from_slice(&header_buf);

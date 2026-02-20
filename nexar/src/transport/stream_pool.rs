@@ -36,7 +36,7 @@ impl StreamPool {
                 .conn
                 .open_uni()
                 .await
-                .map_err(|e| NexarError::transport(format!("open uni stream: {e}")))?;
+                .map_err(|e| NexarError::transport_with_source("open uni stream", e))?;
             ready.push(stream);
         }
         Ok(())
@@ -54,6 +54,6 @@ impl StreamPool {
         self.conn
             .open_uni()
             .await
-            .map_err(|e| NexarError::transport(format!("open uni stream: {e}")))
+            .map_err(|e| NexarError::transport_with_source("open uni stream", e))
     }
 }

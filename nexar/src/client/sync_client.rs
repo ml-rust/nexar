@@ -16,7 +16,7 @@ impl SyncClient {
     /// Bootstrap a local cluster and return sync clients for each rank.
     pub fn bootstrap_local(world_size: u32, adapter: Arc<dyn DeviceAdapter>) -> Result<Vec<Self>> {
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| crate::error::NexarError::transport(format!("tokio runtime: {e}")))?;
+            .map_err(|e| crate::error::NexarError::transport_with_source("tokio runtime", e))?;
 
         let clients = rt.block_on(super::NexarClient::bootstrap_local(world_size, adapter))?;
 
@@ -31,7 +31,7 @@ impl SyncClient {
 
         for client in iter {
             let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| crate::error::NexarError::transport(format!("tokio runtime: {e}")))?;
+                .map_err(|e| crate::error::NexarError::transport_with_source("tokio runtime", e))?;
             sync_clients.push(SyncClient { inner: client, rt });
         }
 
@@ -41,7 +41,7 @@ impl SyncClient {
     /// Wrap an existing async client with a new tokio runtime.
     pub fn from_async(inner: super::NexarClient) -> Result<Self> {
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| crate::error::NexarError::transport(format!("tokio runtime: {e}")))?;
+            .map_err(|e| crate::error::NexarError::transport_with_source("tokio runtime", e))?;
         Ok(Self { inner, rt })
     }
 

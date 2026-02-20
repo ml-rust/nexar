@@ -95,20 +95,20 @@ impl SeedNode {
             let (send, mut recv) = conn
                 .accept_bi()
                 .await
-                .map_err(|e| NexarError::transport(format!("accept bi from new worker: {e}")))?;
+                .map_err(|e| NexarError::transport_with_source("accept bi from new worker", e))?;
 
             // Read Hello message.
             let mut header_buf = [0u8; HEADER_SIZE];
             recv.read_exact(&mut header_buf)
                 .await
-                .map_err(|e| NexarError::transport(format!("read hello header: {e}")))?;
+                .map_err(|e| NexarError::transport_with_source("read hello header", e))?;
             let payload_len =
                 u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]])
                     as usize;
             let mut payload = vec![0u8; payload_len];
             recv.read_exact(&mut payload)
                 .await
-                .map_err(|e| NexarError::transport(format!("read hello payload: {e}")))?;
+                .map_err(|e| NexarError::transport_with_source("read hello payload", e))?;
 
             let mut full_buf = Vec::with_capacity(HEADER_SIZE + payload_len);
             full_buf.extend_from_slice(&header_buf);
@@ -170,9 +170,9 @@ impl SeedNode {
                 node_key: node_key.secret_der().to_vec(),
             };
             let buf = encode_message(&welcome, Priority::Critical)?;
-            send.write_all(&buf)
-                .await
-                .map_err(|e| NexarError::transport(format!("send welcome to rank {rank}: {e}")))?;
+            send.write_all(&buf).await.map_err(|e| {
+                NexarError::transport_with_source(format!("send welcome to rank {rank}"), e)
+            })?;
             conns.push(conn);
         }
 

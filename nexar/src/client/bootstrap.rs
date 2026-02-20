@@ -37,13 +37,13 @@ impl NexarClient {
 
         let (_map, _seed_conns) = seed_handle
             .await
-            .map_err(|e| NexarError::transport(format!("seed task panicked: {e}")))??;
+            .map_err(|e| NexarError::transport_with_source("seed task panicked", e))??;
 
         let mut workers: Vec<WorkerNode> = Vec::new();
         for h in worker_handles {
             workers.push(
                 h.await
-                    .map_err(|e| NexarError::transport(format!("worker task panicked: {e}")))??,
+                    .map_err(|e| NexarError::transport_with_source("worker task panicked", e))??,
             );
         }
 
@@ -125,19 +125,19 @@ async fn build_mesh(
             pair_futures.push(tokio::spawn(async move {
                 let mut endpoint =
                     quinn::Endpoint::client("0.0.0.0:0".parse().expect("hardcoded socket addr"))
-                        .map_err(|e| NexarError::transport(format!("mesh client: {e}")))?;
+                        .map_err(|e| NexarError::transport_with_source("mesh client", e))?;
                 endpoint.set_default_client_config(config_i);
 
                 let accept_fut = listener_j.accept();
                 let connect_fut = endpoint.connect(addr_j, "localhost");
 
-                let connect_connecting =
-                    connect_fut.map_err(|e| NexarError::transport(format!("mesh connect: {e}")))?;
+                let connect_connecting = connect_fut
+                    .map_err(|e| NexarError::transport_with_source("mesh connect", e))?;
 
                 let (accepted, connected) = tokio::try_join!(accept_fut, async {
                     connect_connecting
                         .await
-                        .map_err(|e| NexarError::transport(format!("mesh handshake: {e}")))
+                        .map_err(|e| NexarError::transport_with_source("mesh handshake", e))
                 })?;
 
                 let conn_ij = PeerConnection::new(rank_j, connected);
@@ -157,7 +157,7 @@ async fn build_mesh(
     for handle in pair_futures {
         let (i, j, rank_i, rank_j, conn_ij, conn_ji) = handle
             .await
-            .map_err(|e| NexarError::transport(format!("mesh task panicked: {e}")))??;
+            .map_err(|e| NexarError::transport_with_source("mesh task panicked", e))??;
         all_peers[i].insert(rank_j, conn_ij);
         all_peers[j].insert(rank_i, conn_ji);
     }
