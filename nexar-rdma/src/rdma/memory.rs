@@ -4,7 +4,7 @@
 //! protection domain. Registration pins memory and is expensive, so we
 //! pre-allocate a pool of registered buffers and reuse them.
 
-use super::connection::RdmaContext;
+use super::context::RdmaContext;
 use super::mr::RdmaMr;
 use crossbeam_queue::ArrayQueue;
 use nexar::error::Result;
