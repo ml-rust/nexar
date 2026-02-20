@@ -140,14 +140,13 @@ async fn build_mesh(
                         .map_err(|e| NexarError::transport(format!("mesh handshake: {e}")))
                 })?;
 
-                Ok::<_, NexarError>((
-                    i,
-                    j,
-                    rank_i,
-                    rank_j,
-                    PeerConnection::new(rank_j, connected),
-                    PeerConnection::new(rank_i, accepted),
-                ))
+                let conn_ij = PeerConnection::new(rank_j, connected);
+                let conn_ji = PeerConnection::new(rank_i, accepted);
+
+                // Pre-open streams to reduce first-send latency.
+                tokio::join!(conn_ij.warm_stream_pool(), conn_ji.warm_stream_pool());
+
+                Ok::<_, NexarError>((i, j, rank_i, rank_j, conn_ij, conn_ji))
             }));
         }
     }
@@ -214,10 +213,10 @@ async fn establish_tcp_sidecars(clients: &[NexarClient]) -> Result<()> {
 
             // Attach as TaggedBulkTransport to the peer connections.
             let peer_ij = clients[i].peer(rank_j)?;
-            peer_ij.add_extension(Arc::new(transport_i) as Arc<dyn TaggedBulkTransport>);
+            peer_ij.add_extension(Arc::new(transport_i) as Arc<dyn TaggedBulkTransport>)?;
 
             let peer_ji = clients[j].peer(rank_i)?;
-            peer_ji.add_extension(Arc::new(transport_j) as Arc<dyn TaggedBulkTransport>);
+            peer_ji.add_extension(Arc::new(transport_j) as Arc<dyn TaggedBulkTransport>)?;
         }
     }
 

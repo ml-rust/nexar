@@ -2,6 +2,7 @@ pub mod buffer_pool;
 mod connection;
 mod listener;
 pub mod router;
+pub(crate) mod stream_pool;
 pub mod tcp_bulk;
 pub(crate) mod tls;
 

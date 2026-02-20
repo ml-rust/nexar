@@ -19,9 +19,10 @@ pub(crate) struct RdmaState {
 }
 
 /// Extract the `Arc<RdmaState>` from a `PeerConnection`, dropping the guard immediately.
-fn get_rdma(peer: &PeerConnection) -> Option<Arc<RdmaState>> {
-    peer.extension::<RdmaStateHolder>()
-        .map(|holder| Arc::clone(&holder.0))
+fn get_rdma(peer: &PeerConnection) -> Result<Option<Arc<RdmaState>>> {
+    Ok(peer
+        .extension::<RdmaStateHolder>()?
+        .map(|holder| Arc::clone(&holder.0)))
 }
 
 /// Extension trait that adds RDMA bulk-send capabilities to `PeerConnection`.
@@ -69,15 +70,16 @@ impl PeerConnectionRdmaExt for PeerConnection {
             conn: std::sync::Mutex::new(rdma_conn),
             pool,
         });
-        self.add_extension(RdmaStateHolder(Arc::clone(&state)));
+        // Ignore errors — set_rdma is best-effort setup.
+        let _ = self.add_extension(RdmaStateHolder(Arc::clone(&state)));
         // Register as BulkTransport so collectives auto-select RDMA.
         let bulk: Arc<dyn BulkTransport> = Arc::new(RdmaBulkTransport(state));
-        self.add_extension(bulk);
+        let _ = self.add_extension(bulk);
     }
 
     async fn send_raw_rdma(&self, data: &[u8]) -> Result<()> {
         // Extract Arc and drop the extension guard before any .await.
-        if let Some(rdma) = get_rdma(self) {
+        if let Some(rdma) = get_rdma(self)? {
             return send_via_rdma(rdma, data).await;
         }
         // Fallback to QUIC.
@@ -116,9 +118,10 @@ mod gpudirect_ext {
         pub pool: Arc<GpuDirectPool>,
     }
 
-    fn get_gpudirect(peer: &PeerConnection) -> Option<Arc<GpuDirectState>> {
-        peer.extension::<GpuDirectStateHolder>()
-            .map(|holder| Arc::clone(&holder.0))
+    fn get_gpudirect(peer: &PeerConnection) -> Result<Option<Arc<GpuDirectState>>> {
+        Ok(peer
+            .extension::<GpuDirectStateHolder>()?
+            .map(|holder| Arc::clone(&holder.0)))
     }
 
     /// Extension trait for GPUDirect RDMA on `PeerConnection`.
@@ -145,7 +148,7 @@ mod gpudirect_ext {
 
     impl PeerConnectionGpuDirectExt for PeerConnection {
         fn set_gpudirect(&self, qp: GpuDirectQp, pool: Arc<GpuDirectPool>) {
-            self.add_extension(GpuDirectStateHolder(Arc::new(GpuDirectState {
+            let _ = self.add_extension(GpuDirectStateHolder(Arc::new(GpuDirectState {
                 qp: std::sync::Mutex::new(qp),
                 pool,
             })));
@@ -153,7 +156,7 @@ mod gpudirect_ext {
 
         async fn send_raw_gpu(&self, gpu_ptr: u64, size: usize) -> Result<()> {
             // Extract Arc and drop extension guard before any .await.
-            if let Some(gd) = get_gpudirect(self) {
+            if let Some(gd) = get_gpudirect(self)? {
                 if let Some(pooled) = gd.pool.checkout() {
                     let mr_size = pooled.mr().size();
                     let mr_gpu_ptr = pooled.mr().gpu_ptr();
@@ -202,7 +205,7 @@ mod gpudirect_ext {
         }
 
         async fn recv_raw_gpu(&self, gpu_ptr: u64, size: usize) -> Result<()> {
-            if let Some(gd) = get_gpudirect(self) {
+            if let Some(gd) = get_gpudirect(self)? {
                 if let Some(pooled) = gd.pool.checkout() {
                     let mr_size = pooled.mr().size();
                     let mr_gpu_ptr = pooled.mr().gpu_ptr();

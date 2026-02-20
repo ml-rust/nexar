@@ -78,6 +78,18 @@ pub enum NexarError {
 
     #[error("cluster token mismatch: bootstrap authentication failed")]
     ClusterTokenMismatch,
+
+    #[error(
+        "count {count} is not evenly divisible by world size {world_size} (required by {operation})"
+    )]
+    IndivisibleCount {
+        count: usize,
+        world_size: usize,
+        operation: &'static str,
+    },
+
+    #[error("internal lock poisoned: {0}")]
+    LockPoisoned(&'static str),
 }
 
 impl NexarError {
@@ -212,6 +224,12 @@ mod tests {
                 reason: "peer disconnected".into(),
             },
             NexarError::Cancelled,
+            NexarError::IndivisibleCount {
+                count: 7,
+                world_size: 4,
+                operation: "rs_ag_allreduce",
+            },
+            NexarError::LockPoisoned("extensions"),
         ];
         for e in &errors {
             assert!(!e.to_string().is_empty(), "empty display for {e:?}");

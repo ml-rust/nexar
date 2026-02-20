@@ -63,8 +63,7 @@ const STREAM_POOL_MAX_READY: usize = 8;
 impl PeerConnection {
     /// Create a `PeerConnection` from an established QUIC connection.
     pub fn new(rank: Rank, conn: quinn::Connection) -> Self {
-        let stream_pool =
-            super::stream_pool::StreamPool::new(conn.clone(), STREAM_POOL_MAX_READY);
+        let stream_pool = super::stream_pool::StreamPool::new(conn.clone(), STREAM_POOL_MAX_READY);
         Self {
             rank,
             conn,
@@ -73,25 +72,48 @@ impl PeerConnection {
         }
     }
 
+    /// Pre-open streams in the pool to reduce first-send latency.
+    ///
+    /// Should be called once after connection establishment. Non-fatal: if
+    /// pre-opening fails (e.g. connection not yet ready), streams will be
+    /// opened on-demand at send time.
+    pub async fn warm_stream_pool(&self) {
+        let _ = self.stream_pool.refill().await;
+    }
+
     /// Attach an extension object (e.g. RDMA state) to this connection.
-    pub fn add_extension<T: std::any::Any + Send + Sync + 'static>(&self, ext: T) {
-        let mut exts = self.extensions.write().expect("extensions lock poisoned");
+    pub fn add_extension<T: std::any::Any + Send + Sync + 'static>(
+        &self,
+        ext: T,
+    ) -> crate::error::Result<()> {
+        let mut exts = self
+            .extensions
+            .write()
+            .map_err(|_| NexarError::LockPoisoned("extensions"))?;
         exts.push(Box::new(ext));
+        Ok(())
     }
 
     /// Retrieve a reference to an extension by type.
     ///
     /// Returns `None` if no extension of that type has been attached.
+    /// Returns `Err` if the lock is poisoned.
     pub fn extension<T: std::any::Any + Send + Sync + 'static>(
         &self,
-    ) -> Option<impl std::ops::Deref<Target = T> + '_> {
-        let exts = self.extensions.read().expect("extensions lock poisoned");
-        let idx = exts.iter().position(|e| e.downcast_ref::<T>().is_some())?;
-        Some(ExtensionRef {
+    ) -> crate::error::Result<Option<impl std::ops::Deref<Target = T> + '_>> {
+        let exts = self
+            .extensions
+            .read()
+            .map_err(|_| NexarError::LockPoisoned("extensions"))?;
+        let idx = match exts.iter().position(|e| e.downcast_ref::<T>().is_some()) {
+            Some(idx) => idx,
+            None => return Ok(None),
+        };
+        Ok(Some(ExtensionRef {
             guard: exts,
             idx,
             _marker: std::marker::PhantomData,
-        })
+        }))
     }
 
     /// Send a control message as a framed uni stream (always QUIC).
@@ -138,7 +160,7 @@ impl PeerConnection {
     pub async fn send_raw_best_effort(&self, data: &[u8]) -> Result<()> {
         // Extract the BulkTransport Arc and drop the extension guard before .await.
         let bulk: Option<std::sync::Arc<dyn BulkTransport>> = self
-            .extension::<std::sync::Arc<dyn BulkTransport>>()
+            .extension::<std::sync::Arc<dyn BulkTransport>>()?
             .map(|b| std::sync::Arc::clone(&*b));
         if let Some(bulk) = bulk {
             if bulk.send_bulk(data).await.is_ok() {
@@ -183,7 +205,7 @@ impl PeerConnection {
     /// (RDMA) is NOT used here because it doesn't carry tags.
     pub async fn send_raw_tagged_best_effort(&self, tag: u64, data: &[u8]) -> Result<()> {
         let tagged_bulk: Option<std::sync::Arc<dyn super::TaggedBulkTransport>> = self
-            .extension::<std::sync::Arc<dyn super::TaggedBulkTransport>>()
+            .extension::<std::sync::Arc<dyn super::TaggedBulkTransport>>()?
             .map(|b| std::sync::Arc::clone(&*b));
         if let Some(bulk) = tagged_bulk {
             if bulk.send_bulk_tagged(tag, data).await.is_ok() {
@@ -235,8 +257,11 @@ struct ExtensionRef<'a, T> {
 impl<T: std::any::Any> std::ops::Deref for ExtensionRef<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: `extension()` only constructs an `ExtensionRef` after verifying
+        // that `self.guard[self.idx].downcast_ref::<T>()` succeeds, so the type
+        // is guaranteed to match here.
         self.guard[self.idx]
             .downcast_ref::<T>()
-            .expect("extension type mismatch")
+            .expect("extension type mismatch: index was validated at construction")
     }
 }

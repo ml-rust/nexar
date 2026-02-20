@@ -468,7 +468,7 @@ impl NexarClient {
     ) -> Result<PooledBuf> {
         let peer = self.peer(src)?;
         let tagged_bulk: Option<std::sync::Arc<dyn crate::transport::TaggedBulkTransport>> = peer
-            .extension::<std::sync::Arc<dyn crate::transport::TaggedBulkTransport>>()
+            .extension::<std::sync::Arc<dyn crate::transport::TaggedBulkTransport>>()?
             .map(|b| std::sync::Arc::clone(&*b));
         if let Some(bulk) = tagged_bulk {
             if let Ok(data) = bulk.recv_bulk_tagged(tag, expected_size).await {
@@ -545,7 +545,7 @@ impl NexarClient {
             let peer = self.peer(src)?;
             // Try BulkTransport recv_bulk if available.
             let bulk: Option<std::sync::Arc<dyn crate::transport::BulkTransport>> = peer
-                .extension::<std::sync::Arc<dyn crate::transport::BulkTransport>>()
+                .extension::<std::sync::Arc<dyn crate::transport::BulkTransport>>()?
                 .map(|b| std::sync::Arc::clone(&*b));
             if let Some(bulk) = bulk {
                 if let Ok(data) = bulk.recv_bulk(expected_size).await {
