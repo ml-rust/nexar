@@ -173,17 +173,29 @@ pub(crate) fn reduce_slice(
 ) -> Result<()> {
     match dtype {
         DataType::F32 => {
-            // SIMD fast-path for f32 sum on x86_64.
-            #[cfg(target_arch = "x86_64")]
-            if op == ReduceOp::Sum {
-                unsafe { crate::reduce_simd::reduce_f32_sum_simd(dst, src, count) };
+            if unsafe { crate::reduce_simd::reduce_f32_simd(dst, src, count, op) } {
                 return Ok(());
             }
             reduce_slice_typed::<f32>(dst, src, count, op);
         }
-        DataType::F64 => reduce_slice_typed::<f64>(dst, src, count, op),
-        DataType::BF16 => reduce_slice_typed::<Bf16>(dst, src, count, op),
-        DataType::F16 => reduce_slice_typed::<F16>(dst, src, count, op),
+        DataType::F64 => {
+            if unsafe { crate::reduce_simd::reduce_f64_simd(dst, src, count, op) } {
+                return Ok(());
+            }
+            reduce_slice_typed::<f64>(dst, src, count, op);
+        }
+        DataType::BF16 => {
+            if unsafe { crate::reduce_simd::reduce_bf16_simd(dst, src, count, op) } {
+                return Ok(());
+            }
+            reduce_slice_typed::<Bf16>(dst, src, count, op);
+        }
+        DataType::F16 => {
+            if unsafe { crate::reduce_simd::reduce_f16_simd(dst, src, count, op) } {
+                return Ok(());
+            }
+            reduce_slice_typed::<F16>(dst, src, count, op);
+        }
         DataType::I32 => reduce_slice_typed::<i32>(dst, src, count, op),
         DataType::I64 => reduce_slice_typed::<i64>(dst, src, count, op),
         DataType::U32 => reduce_slice_typed::<u32>(dst, src, count, op),

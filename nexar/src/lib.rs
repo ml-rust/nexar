@@ -7,7 +7,6 @@ pub mod error;
 pub mod memory;
 pub mod protocol;
 pub mod reduce;
-#[cfg(target_arch = "x86_64")]
 mod reduce_simd;
 pub mod rpc;
 pub mod transport;
@@ -18,7 +17,7 @@ pub use cluster::{SeedNode, WorkerNode};
 pub use collective::{CollectiveGroup, CollectiveHandle};
 pub use device::{CpuAdapter, DeviceAdapter};
 pub use error::{NexarError, Result};
-pub use memory::GlobalPtr;
+pub use memory::{BufferPtr, BufferRef, Device, GlobalPtr, Host, MemorySpace};
 pub use protocol::NexarMessage;
 pub use transport::buffer_pool::PoolProfile;
 pub use transport::{
