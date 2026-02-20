@@ -44,9 +44,14 @@ pub struct PeerRouter {
     tagged: Arc<Mutex<HashMap<u64, TaggedChannel>>>,
 }
 
-/// A registered communicator channel with sender.
+/// A communicator channel. Lazily created when either a message arrives or
+/// `register_comm` is called. Both sides (router sender and client receiver)
+/// get the same underlying channel.
 struct CommChannel {
     tx: mpsc::Sender<PooledBuf>,
+    /// The receiver, stored here until claimed by `register_comm`.
+    /// Once claimed, this is `None`.
+    rx: Option<mpsc::Receiver<PooledBuf>>,
 }
 
 /// A tagged channel. Lazily created when either a message arrives or
@@ -132,10 +137,18 @@ impl PeerRouter {
 
     /// Register a communicator channel and return the receiver.
     /// Called during `split()` to set up per-comm_id routing.
+    ///
+    /// If messages for this `comm_id` arrived before registration (lazy creation),
+    /// the existing channel's receiver is returned so those messages aren't lost.
     pub async fn register_comm(&self, comm_id: u64) -> mpsc::Receiver<PooledBuf> {
-        let (tx, rx) = mpsc::channel(LANE_CAPACITY);
         let mut comms = self.raw_comms.lock().await;
-        comms.insert(comm_id, CommChannel { tx });
+        if let Some(ch) = comms.get_mut(&comm_id)
+            && let Some(rx) = ch.rx.take()
+        {
+            return rx;
+        }
+        let (tx, rx) = mpsc::channel(LANE_CAPACITY);
+        comms.insert(comm_id, CommChannel { tx, rx: None });
         rx
     }
 
@@ -305,17 +318,13 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) -> Res
                 None => return Ok(()),
             };
 
-            let comms = tx.raw_comms.lock().await;
-            if let Some(ch) = comms.get(&comm_id) {
-                if ch.tx.send(buf).await.is_err() {
-                    return Err(NexarError::PeerDisconnected { rank: tx.rank });
-                }
-            } else {
-                tracing::warn!(
-                    rank = tx.rank,
-                    comm_id,
-                    "router: no registered comm channel, discarding"
-                );
+            let mut comms = tx.raw_comms.lock().await;
+            let ch = comms.entry(comm_id).or_insert_with(|| {
+                let (tx, rx) = mpsc::channel(LANE_CAPACITY);
+                CommChannel { tx, rx: Some(rx) }
+            });
+            if ch.tx.send(buf).await.is_err() {
+                return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }
         }
         other => {
