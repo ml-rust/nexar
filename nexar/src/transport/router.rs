@@ -225,38 +225,46 @@ async fn accept_loop(conn: quinn::Connection, tx: RouterSenders) -> Result<()> {
 
         let tx = tx.clone();
         tokio::spawn(async move {
-            handle_stream(stream, &tx).await;
+            if let Err(e) = handle_stream(stream, &tx).await {
+                tracing::error!(
+                    rank = tx.rank,
+                    "router: local receiver dropped, messages will be lost: {e}"
+                );
+            }
             drop(permit);
         });
     }
 }
 
 /// Read a single stream (tag + payload) and dispatch to the correct lane.
-async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
+///
+/// Returns `Err` if a channel receiver has been dropped, indicating the local
+/// consumer is gone and further messages for this peer will be lost.
+async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) -> Result<()> {
     let mut tag_buf = [0u8; 1];
     if stream.read_exact(&mut tag_buf).await.is_err() {
         tracing::warn!(
             rank = tx.rank,
             "router: failed to read stream tag, skipping stream"
         );
-        return;
+        return Ok(());
     }
 
     match tag_buf[0] {
         STREAM_TAG_FRAMED => {
             let msg = match read_framed(&mut stream, tx.rank, &tx.pool).await {
                 Some(m) => m,
-                None => return,
+                None => return Ok(()),
             };
-            dispatch_framed(msg, tx).await;
+            dispatch_framed(msg, tx).await?;
         }
         STREAM_TAG_RAW => {
             let buf = match read_raw(&mut stream, tx.rank, &tx.pool).await {
                 Some(b) => b,
-                None => return,
+                None => return Ok(()),
             };
             if tx.raw.send(buf).await.is_err() {
-                tracing::warn!(rank = tx.rank, "router: raw receiver dropped");
+                return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }
         }
         STREAM_TAG_RAW_TAGGED => {
@@ -264,13 +272,13 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
             let mut tag_bytes = [0u8; 8];
             if stream.read_exact(&mut tag_bytes).await.is_err() {
                 tracing::warn!(rank = tx.rank, "router: failed to read tagged tag");
-                return;
+                return Ok(());
             }
             let tag = u64::from_le_bytes(tag_bytes);
 
             let buf = match read_raw(&mut stream, tx.rank, &tx.pool).await {
                 Some(b) => b,
-                None => return,
+                None => return Ok(()),
             };
 
             let mut tags = tx.tagged.lock().await;
@@ -280,7 +288,7 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
                 TaggedChannel { tx, rx: Some(rx) }
             });
             if ch.tx.send(buf).await.is_err() {
-                tracing::warn!(rank = tx.rank, tag, "router: tagged receiver dropped");
+                return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }
         }
         STREAM_TAG_RAW_COMM => {
@@ -288,19 +296,19 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
             let mut comm_id_buf = [0u8; 8];
             if stream.read_exact(&mut comm_id_buf).await.is_err() {
                 tracing::warn!(rank = tx.rank, "router: failed to read comm_id");
-                return;
+                return Ok(());
             }
             let comm_id = u64::from_le_bytes(comm_id_buf);
 
             let buf = match read_raw(&mut stream, tx.rank, &tx.pool).await {
                 Some(b) => b,
-                None => return,
+                None => return Ok(()),
             };
 
             let comms = tx.raw_comms.lock().await;
             if let Some(ch) = comms.get(&comm_id) {
                 if ch.tx.send(buf).await.is_err() {
-                    tracing::warn!(rank = tx.rank, comm_id, "router: comm raw receiver dropped");
+                    return Err(NexarError::PeerDisconnected { rank: tx.rank });
                 }
             } else {
                 tracing::warn!(
@@ -318,14 +326,17 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
             );
         }
     }
+    Ok(())
 }
 
 /// Route a decoded framed message to the correct lane.
-async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) {
+///
+/// Returns `Err` if the target channel's receiver has been dropped.
+async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) -> Result<()> {
     match msg {
         NexarMessage::Rpc { .. } => {
             if tx.rpc_requests.send(msg).await.is_err() {
-                tracing::warn!(rank = tx.rank, "router: rpc_requests receiver dropped");
+                return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }
         }
         NexarMessage::RpcResponse { req_id, .. } => {
@@ -350,15 +361,16 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) {
         | NexarMessage::RdmaEndpoint { .. }
         | NexarMessage::SplitRequest { .. } => {
             if tx.control.send(msg).await.is_err() {
-                tracing::warn!(rank = tx.rank, "router: control receiver dropped");
+                return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }
         }
         NexarMessage::Data { .. } => {
             if tx.data.send(msg).await.is_err() {
-                tracing::warn!(rank = tx.rank, "router: data receiver dropped");
+                return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }
         }
     }
+    Ok(())
 }
 
 /// Read a length-prefixed payload from a stream into a pooled buffer.
