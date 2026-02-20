@@ -6,7 +6,7 @@
 //! QUIC-only transport (logged as a warning).
 
 use nexar::{CpuAdapter, DataType, NexarClient, ReduceOp};
-use nexar_rdma::bootstrap::establish_rdma_mesh;
+use nexar_rdma::bootstrap::establish_rdma_mesh_local;
 use std::sync::Arc;
 
 /// Helper: bootstrap + RDMA mesh, then run a collective across N clients.
@@ -21,7 +21,7 @@ where
         .unwrap();
 
     // Attempt to establish RDMA mesh (falls back to QUIC if no IB hardware).
-    establish_rdma_mesh(&clients).await;
+    establish_rdma_mesh_local(&clients).await;
 
     let clients: Vec<Arc<NexarClient>> = clients.into_iter().map(Arc::new).collect();
 
@@ -41,7 +41,7 @@ where
 async fn test_rdma_mesh_bootstrap_2_nodes() {
     let adapter = Arc::new(CpuAdapter::new());
     let clients = NexarClient::bootstrap_local(2, adapter).await.unwrap();
-    establish_rdma_mesh(&clients).await;
+    establish_rdma_mesh_local(&clients).await;
     assert_eq!(clients.len(), 2);
     assert_eq!(clients[0].rank(), 0);
     assert_eq!(clients[1].rank(), 1);
@@ -51,7 +51,7 @@ async fn test_rdma_mesh_bootstrap_2_nodes() {
 async fn test_rdma_mesh_bootstrap_4_nodes() {
     let adapter = Arc::new(CpuAdapter::new());
     let clients = NexarClient::bootstrap_local(4, adapter).await.unwrap();
-    establish_rdma_mesh(&clients).await;
+    establish_rdma_mesh_local(&clients).await;
     for (i, c) in clients.iter().enumerate() {
         assert_eq!(c.rank() as usize, i);
         assert_eq!(c.world_size(), 4);

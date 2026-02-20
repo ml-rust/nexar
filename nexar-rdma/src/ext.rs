@@ -1,8 +1,10 @@
 //! Extension traits for `PeerConnection` that add RDMA capabilities.
 
 use crate::rdma::{RdmaConnection, RdmaMemoryPool};
+use futures::future::BoxFuture;
 use nexar::PeerConnection;
 use nexar::error::{NexarError, Result};
+use nexar::transport::BulkTransport;
 use std::sync::Arc;
 
 /// RDMA state attached to a `PeerConnection` via the extensions slot.
@@ -34,12 +36,26 @@ pub trait PeerConnectionRdmaExt {
     fn send_raw_rdma(&self, data: &[u8]) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
+/// `BulkTransport` implementation backed by RDMA.
+struct RdmaBulkTransport(Arc<RdmaState>);
+
+impl BulkTransport for RdmaBulkTransport {
+    fn send_bulk<'a>(&'a self, data: &'a [u8]) -> BoxFuture<'a, Result<()>> {
+        let rdma = Arc::clone(&self.0);
+        Box::pin(async move { send_via_rdma(rdma, data).await })
+    }
+}
+
 impl PeerConnectionRdmaExt for PeerConnection {
     fn set_rdma(&self, rdma_conn: RdmaConnection, pool: Arc<RdmaMemoryPool>) {
-        self.add_extension(RdmaStateHolder(Arc::new(RdmaState {
+        let state = Arc::new(RdmaState {
             conn: std::sync::Mutex::new(rdma_conn),
             pool,
-        })));
+        });
+        self.add_extension(RdmaStateHolder(Arc::clone(&state)));
+        // Register as BulkTransport so collectives auto-select RDMA.
+        let bulk: Arc<dyn BulkTransport> = Arc::new(RdmaBulkTransport(state));
+        self.add_extension(bulk);
     }
 
     async fn send_raw_rdma(&self, data: &[u8]) -> Result<()> {

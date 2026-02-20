@@ -15,8 +15,8 @@
 //! ```ignore
 //! use nexar_rdma::ext::PeerConnectionRdmaExt;
 //!
-//! // After bootstrap, establish RDMA mesh:
-//! nexar_rdma::bootstrap::establish_rdma_mesh(&clients).await;
+//! // After bootstrap, each rank calls establish_rdma_mesh:
+//! nexar_rdma::bootstrap::establish_rdma_mesh(&client).await;
 //!
 //! // Send via RDMA with QUIC fallback:
 //! peer.send_raw_rdma(data).await?;
