@@ -178,12 +178,18 @@ impl PeerConnection {
 
     /// Send tagged bytes using the best available transport.
     ///
-    /// Tries any attached `BulkTransport` accelerator first, falling back to
-    /// QUIC tagged send. Note: bulk transport doesn't carry the tag, so the
-    /// receiver must already know to expect data on this tag.
+    /// Tries `TaggedBulkTransport` first (e.g., TCP sidecar which carries tags
+    /// natively), then falls back to QUIC tagged send. Plain `BulkTransport`
+    /// (RDMA) is NOT used here because it doesn't carry tags.
     pub async fn send_raw_tagged_best_effort(&self, tag: u64, data: &[u8]) -> Result<()> {
-        // For tagged sends, always use QUIC so the tag is preserved on the wire.
-        // BulkTransport (RDMA) doesn't carry tags — it's only safe for untagged bulk.
+        let tagged_bulk: Option<std::sync::Arc<dyn super::TaggedBulkTransport>> = self
+            .extension::<std::sync::Arc<dyn super::TaggedBulkTransport>>()
+            .map(|b| std::sync::Arc::clone(&*b));
+        if let Some(bulk) = tagged_bulk {
+            if bulk.send_bulk_tagged(tag, data).await.is_ok() {
+                return Ok(());
+            }
+        }
         self.send_raw_tagged(tag, data).await
     }
 

@@ -119,7 +119,13 @@ pub(crate) async fn collective_recv_with_tag(
     tag: CollectiveTag,
 ) -> Result<PooledBuf> {
     let result = match tag {
-        Some(t) => tokio::time::timeout(COLLECTIVE_TIMEOUT, client.recv_bytes_tagged(src, t)).await,
+        Some(t) => {
+            tokio::time::timeout(
+                COLLECTIVE_TIMEOUT,
+                client.recv_bytes_tagged_best_effort(src, t, 0),
+            )
+            .await
+        }
         None => tokio::time::timeout(COLLECTIVE_TIMEOUT, client.recv_bytes(src)).await,
     };
     match result {

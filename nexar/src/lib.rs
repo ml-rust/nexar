@@ -21,5 +21,7 @@ pub use error::{NexarError, Result};
 pub use memory::GlobalPtr;
 pub use protocol::NexarMessage;
 pub use transport::buffer_pool::PoolProfile;
-pub use transport::{BulkTransport, PeerConnection, TransportListener};
+pub use transport::{
+    BulkTransport, PeerConnection, TaggedBulkTransport, TcpBulkTransport, TransportListener,
+};
 pub use types::{DataType, IoVec, NodeId, Priority, Rank, ReduceOp};

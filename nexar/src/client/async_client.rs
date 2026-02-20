@@ -457,6 +457,30 @@ impl NexarClient {
         peer.send_raw_tagged(tag, data).await
     }
 
+    /// Receive tagged bytes using the best available transport.
+    ///
+    /// Tries `TaggedBulkTransport` (TCP sidecar) first, falling back to QUIC.
+    pub(crate) async fn recv_bytes_tagged_best_effort(
+        &self,
+        src: Rank,
+        tag: u64,
+        expected_size: usize,
+    ) -> Result<PooledBuf> {
+        let peer = self.peer(src)?;
+        let tagged_bulk: Option<std::sync::Arc<dyn crate::transport::TaggedBulkTransport>> = peer
+            .extension::<std::sync::Arc<dyn crate::transport::TaggedBulkTransport>>()
+            .map(|b| std::sync::Arc::clone(&*b));
+        if let Some(bulk) = tagged_bulk {
+            if let Ok(data) = bulk.recv_bulk_tagged(tag, expected_size).await {
+                return Ok(PooledBuf::from_vec(
+                    data,
+                    std::sync::Arc::clone(&self._pool),
+                ));
+            }
+        }
+        self.recv_bytes_tagged(src, tag).await
+    }
+
     /// Send tagged bytes using the best available transport.
     pub(crate) async fn send_bytes_tagged_best_effort(
         &self,

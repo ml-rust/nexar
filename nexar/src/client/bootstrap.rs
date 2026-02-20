@@ -176,7 +176,52 @@ async fn build_mesh(
     // Sort by rank.
     clients.sort_by_key(|c| c.rank());
 
+    // Establish TCP bulk sidecar connections between each peer pair.
+    establish_tcp_sidecars(&clients).await?;
+
     Ok(clients)
+}
+
+/// Establish TCP bulk sidecar connections between all peer pairs.
+///
+/// For each (i, j) pair with i < j: rank i listens, rank j connects.
+/// The resulting `TcpBulkTransport` is attached as a `TaggedBulkTransport`
+/// extension so `send_raw_tagged_best_effort` / `recv_bytes_tagged_best_effort`
+/// automatically use the fast path.
+async fn establish_tcp_sidecars(clients: &[NexarClient]) -> Result<()> {
+    use crate::transport::TaggedBulkTransport;
+    use crate::transport::tcp_bulk::{tcp_bulk_accept, tcp_bulk_connect, tcp_bulk_listen};
+
+    let n = clients.len();
+    if n <= 1 {
+        return Ok(());
+    }
+
+    // For each pair (i, j) with i < j: i listens, j connects.
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let rank_j = clients[j].rank();
+            let rank_i = clients[i].rank();
+
+            let bind_addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::LOCALHOST,
+                0,
+            ));
+            let (listener, addr) = tcp_bulk_listen(bind_addr).await?;
+
+            let (transport_i, transport_j) =
+                tokio::try_join!(tcp_bulk_accept(&listener), tcp_bulk_connect(addr),)?;
+
+            // Attach as TaggedBulkTransport to the peer connections.
+            let peer_ij = clients[i].peer(rank_j)?;
+            peer_ij.add_extension(Arc::new(transport_i) as Arc<dyn TaggedBulkTransport>);
+
+            let peer_ji = clients[j].peer(rank_i)?;
+            peer_ji.add_extension(Arc::new(transport_j) as Arc<dyn TaggedBulkTransport>);
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

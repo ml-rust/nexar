@@ -2,8 +2,10 @@ pub mod buffer_pool;
 mod connection;
 mod listener;
 pub mod router;
+pub mod tcp_bulk;
 pub(crate) mod tls;
 
 pub use connection::{BulkTransport, PeerConnection};
 pub use listener::TransportListener;
 pub use router::PeerRouter;
+pub use tcp_bulk::{TaggedBulkTransport, TcpBulkTransport};
