@@ -61,12 +61,15 @@ pub(crate) fn collective_timeout(client: &NexarClient) -> Duration {
     client.config.collective_timeout
 }
 
-/// Tag context for collective operations: `None` for untagged (default lane),
-/// `Some(tag)` for tagged transport (concurrent collectives).
+/// Tag context for collective operations.
+///
+/// All collectives require a tag (`Some(tag)`) for message isolation via
+/// tagged transport. `None` falls back to the untagged raw lane (only used
+/// internally by barrier).
 pub(crate) type CollectiveTag = Option<u64>;
 
-/// Send bytes to a peer with optional tag and timeout.
-pub(crate) async fn collective_send_with_tag(
+/// Send bytes to a peer with tag-based routing and timeout.
+pub(crate) async fn collective_send(
     client: &NexarClient,
     dest: Rank,
     data: &[u8],
@@ -95,8 +98,8 @@ pub(crate) async fn collective_send_with_tag(
     }
 }
 
-/// Receive bytes from a peer with optional tag and timeout.
-pub(crate) async fn collective_recv_with_tag(
+/// Receive bytes from a peer with tag-based routing and timeout.
+pub(crate) async fn collective_recv(
     client: &NexarClient,
     src: Rank,
     operation: &'static str,

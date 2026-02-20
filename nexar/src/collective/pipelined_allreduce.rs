@@ -5,9 +5,7 @@
 //! overlaps with network I/O across pipeline stages.
 
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    ChunkLayout, CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{ChunkLayout, CollectiveTag, collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
@@ -111,8 +109,8 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
             let step_tag = Some(pack_tag(outer_tag, 0, step as u16, 0));
 
             let (_, received) = tokio::try_join!(
-                collective_send_with_tag(client, next as u32, &send_data, "allreduce", step_tag),
-                collective_recv_with_tag(client, prev as u32, "allreduce", step_tag),
+                collective_send(client, next as u32, &send_data, "allreduce", step_tag),
+                collective_recv(client, prev as u32, "allreduce", step_tag),
             )?;
 
             if received.len() != recv_bytes {
@@ -137,8 +135,8 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
         let tag_0 = Some(pack_tag(outer_tag, 0, step as u16, 0));
 
         let (_, mut prev_received) = tokio::try_join!(
-            collective_send_with_tag(client, next as u32, &send_data_0, "allreduce", tag_0),
-            collective_recv_with_tag(client, prev as u32, "allreduce", tag_0),
+            collective_send(client, next as u32, &send_data_0, "allreduce", tag_0),
+            collective_recv(client, prev as u32, "allreduce", tag_0),
         )?;
 
         // Pipeline loop: reduce seg[k-1] while sending/receiving seg[k].
@@ -171,8 +169,8 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
             let tag_k = Some(pack_tag(outer_tag, 0, step as u16, seg as u16));
 
             let (_, r) = tokio::try_join!(
-                collective_send_with_tag(client, next as u32, &send_data_k, "allreduce", tag_k,),
-                collective_recv_with_tag(client, prev as u32, "allreduce", tag_k),
+                collective_send(client, next as u32, &send_data_k, "allreduce", tag_k,),
+                collective_recv(client, prev as u32, "allreduce", tag_k),
             )?;
             prev_received = r;
         }
@@ -219,8 +217,8 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
             let step_tag = Some(pack_tag(outer_tag, 1, step as u16, 0));
 
             let (_, received) = tokio::try_join!(
-                collective_send_with_tag(client, next as u32, &send_data, "allreduce", step_tag),
-                collective_recv_with_tag(client, prev as u32, "allreduce", step_tag),
+                collective_send(client, next as u32, &send_data, "allreduce", step_tag),
+                collective_recv(client, prev as u32, "allreduce", step_tag),
             )?;
 
             if received.len() != recv_bytes {
@@ -243,8 +241,8 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
             let tag_k = Some(pack_tag(outer_tag, 1, step as u16, seg as u16));
 
             let (_, received) = tokio::try_join!(
-                collective_send_with_tag(client, next as u32, &send_data, "allreduce", tag_k),
-                collective_recv_with_tag(client, prev as u32, "allreduce", tag_k),
+                collective_send(client, next as u32, &send_data, "allreduce", tag_k),
+                collective_recv(client, prev as u32, "allreduce", tag_k),
             )?;
 
             let (rk_off, rk_len) = segment_range(recv_off, recv_count_r, seg, num_segs, elem_size);

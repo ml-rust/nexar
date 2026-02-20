@@ -1,7 +1,5 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
 use crate::error::Result;
 use crate::types::{DataType, Rank};
 use futures::future::try_join_all;
@@ -9,8 +7,14 @@ use futures::future::try_join_all;
 /// Threshold: use flat broadcast for small worlds, tree broadcast for larger.
 const TREE_BROADCAST_THRESHOLD: u32 = 4;
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn tree_broadcast_with_tag(
+/// Tree broadcast: root sends data to all other ranks via binary tree.
+///
+/// Falls back to flat broadcast (root sends to all directly) for small
+/// world sizes (< `TREE_BROADCAST_THRESHOLD`).
+///
+/// # Safety
+/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+pub(crate) async unsafe fn tree_broadcast(
     client: &NexarClient,
     ptr: u64,
     count: usize,
@@ -42,7 +46,7 @@ pub(crate) async unsafe fn tree_broadcast_with_tag(
     } else {
         let parent_logical = (my_logical - 1) / 2;
         let parent_physical = physical(parent_logical);
-        let received = collective_recv_with_tag(client, parent_physical, "broadcast", tag).await?;
+        let received = collective_recv(client, parent_physical, "broadcast", tag).await?;
         if received.len() != total_bytes {
             return Err(crate::error::NexarError::BufferSizeMismatch {
                 expected: total_bytes,
@@ -62,7 +66,7 @@ pub(crate) async unsafe fn tree_broadcast_with_tag(
         if child_logical < world {
             let child_phys = physical(child_logical);
             let data_ref = &data;
-            futs.push(collective_send_with_tag(
+            futs.push(collective_send(
                 client,
                 child_phys,
                 data_ref,
@@ -98,12 +102,12 @@ async unsafe fn flat_broadcast(
 
         let futs: Vec<_> = (0..world)
             .filter(|&r| r != root)
-            .map(|r| collective_send_with_tag(client, r, &data, "broadcast", tag))
+            .map(|r| collective_send(client, r, &data, "broadcast", tag))
             .collect();
 
         try_join_all(futs).await?;
     } else {
-        let received = collective_recv_with_tag(client, root, "broadcast", tag).await?;
+        let received = collective_recv(client, root, "broadcast", tag).await?;
         if received.len() != total_bytes {
             return Err(crate::error::NexarError::BufferSizeMismatch {
                 expected: total_bytes,

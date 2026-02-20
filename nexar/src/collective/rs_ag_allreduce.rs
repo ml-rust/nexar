@@ -8,15 +8,20 @@
 //! by distributing remainder elements across ranks via [`ChunkLayout`].
 
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    ChunkLayout, CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{ChunkLayout, CollectiveTag, collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
 
-/// Tagged variant for non-blocking RS+AG allreduce.
-pub(crate) async unsafe fn rs_ag_allreduce_with_tag(
+/// Reduce-Scatter + Allgather allreduce.
+///
+/// Decomposes allreduce into scatter-reduce followed by allgather using
+/// ring topology. Useful for ZeRO-style sharding where intermediate
+/// reduce-scatter results are needed.
+///
+/// # Safety
+/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+pub(crate) async unsafe fn rs_ag_allreduce(
     client: &NexarClient,
     ptr: u64,
     count: usize,
@@ -61,8 +66,8 @@ pub(crate) async unsafe fn rs_ag_allreduce_with_tag(
         let send_slice = &buf[send_off..send_off + send_len];
 
         let (_, received) = tokio::try_join!(
-            collective_send_with_tag(client, next as u32, send_slice, "rs_ag_allreduce", rs_tag),
-            collective_recv_with_tag(client, prev as u32, "rs_ag_allreduce", rs_tag),
+            collective_send(client, next as u32, send_slice, "rs_ag_allreduce", rs_tag),
+            collective_recv(client, prev as u32, "rs_ag_allreduce", rs_tag),
         )?;
 
         if received.len() != recv_len {
@@ -88,8 +93,8 @@ pub(crate) async unsafe fn rs_ag_allreduce_with_tag(
         let send_slice = &buf[send_off..send_off + send_len];
 
         let (_, received) = tokio::try_join!(
-            collective_send_with_tag(client, next as u32, send_slice, "rs_ag_allreduce", ag_tag),
-            collective_recv_with_tag(client, prev as u32, "rs_ag_allreduce", ag_tag),
+            collective_send(client, next as u32, send_slice, "rs_ag_allreduce", ag_tag),
+            collective_recv(client, prev as u32, "rs_ag_allreduce", ag_tag),
         )?;
 
         if received.len() != recv_len {

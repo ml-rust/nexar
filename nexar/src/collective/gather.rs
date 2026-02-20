@@ -1,13 +1,18 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
 use crate::error::Result;
 use crate::types::{DataType, Rank};
 use futures::future::try_join_all;
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn gather_with_tag(
+/// Gather: root collects `count` elements from each rank.
+///
+/// Non-root ranks send their data to root; root receives from all peers
+/// concurrently and places each contribution at the sender's rank offset.
+///
+/// # Safety
+/// - `send_ptr`: at least `count * dtype.size_in_bytes()` bytes on all ranks.
+/// - `recv_ptr`: at least `count * world_size * dtype.size_in_bytes()` bytes on root.
+pub(crate) async unsafe fn gather(
     client: &NexarClient,
     send_ptr: u64,
     recv_ptr: u64,
@@ -39,7 +44,7 @@ pub(crate) async unsafe fn gather_with_tag(
         let futs: Vec<_> = (0..world)
             .filter(|&r| r != root)
             .map(|r| async move {
-                let received = collective_recv_with_tag(client, r, "gather", tag).await?;
+                let received = collective_recv(client, r, "gather", tag).await?;
                 if received.len() != chunk_bytes {
                     return Err(crate::error::NexarError::BufferSizeMismatch {
                         expected: chunk_bytes,
@@ -59,7 +64,7 @@ pub(crate) async unsafe fn gather_with_tag(
         try_join_all(futs).await?;
     } else {
         let data = unsafe { client.adapter().stage_for_send(send_ptr, chunk_bytes)? };
-        collective_send_with_tag(client, root, &data, "gather", tag).await?;
+        collective_send(client, root, &data, "gather", tag).await?;
     }
 
     Ok(())

@@ -7,13 +7,20 @@
 //! of parameter groups.
 
 use crate::client::NexarClient;
-use crate::collective::allreduce::ring_allreduce_with_tag;
+use crate::collective::allreduce::ring_allreduce;
 use crate::collective::helpers::CollectiveTag;
 use crate::error::Result;
 use crate::types::{DataType, IoVec, ReduceOp};
 
-/// Tagged variant for non-blocking bucketed allreduce.
-pub(crate) async unsafe fn allreduce_bucketed_with_tag(
+/// Bucketed allreduce: fuse multiple small tensors into one ring allreduce.
+///
+/// Gathers all `(ptr, count)` entries into a contiguous buffer, runs a
+/// single allreduce, then scatters results back. Requires a host-offload
+/// capable adapter (e.g. `CpuAdapter`).
+///
+/// # Safety
+/// Each `(ptr, count)` must point to at least `count * dtype.size_in_bytes()` valid bytes.
+pub(crate) async unsafe fn allreduce_bucketed(
     client: &NexarClient,
     entries: &[(u64, usize)],
     dtype: DataType,
@@ -58,7 +65,7 @@ pub(crate) async unsafe fn allreduce_bucketed_with_tag(
 
     let buf_ptr = buf.as_mut_ptr() as u64;
     unsafe {
-        ring_allreduce_with_tag(client, buf_ptr, total_count, dtype, op, tag).await?;
+        ring_allreduce(client, buf_ptr, total_count, dtype, op, tag).await?;
     }
 
     // Scatter the reduced data back to original device locations.

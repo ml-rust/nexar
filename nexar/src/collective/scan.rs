@@ -1,13 +1,16 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    CollectiveTag, ceil_log2, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{CollectiveTag, ceil_log2, collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::reduce::{identity_slice, reduce_slice};
 use crate::types::{DataType, ReduceOp};
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn inclusive_scan_with_tag(
+/// Inclusive prefix scan: rank `i` holds the reduction of ranks 0..=i.
+///
+/// Uses a parallel prefix (Hillis-Steele) algorithm with O(log N) rounds.
+///
+/// # Safety
+/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+pub(crate) async unsafe fn inclusive_scan(
     client: &NexarClient,
     ptr: u64,
     count: usize,
@@ -42,8 +45,8 @@ pub(crate) async unsafe fn inclusive_scan_with_tag(
                 let dest = rank + distance;
                 let send_data = buf.clone();
                 let (_, received) = tokio::try_join!(
-                    collective_send_with_tag(client, dest as u32, &send_data, "scan", tag),
-                    collective_recv_with_tag(client, source as u32, "scan", tag),
+                    collective_send(client, dest as u32, &send_data, "scan", tag),
+                    collective_recv(client, source as u32, "scan", tag),
                 )?;
                 if received.len() != total_bytes {
                     return Err(NexarError::BufferSizeMismatch {
@@ -55,10 +58,10 @@ pub(crate) async unsafe fn inclusive_scan_with_tag(
             }
             (true, false) => {
                 let dest = rank + distance;
-                collective_send_with_tag(client, dest as u32, &buf, "scan", tag).await?;
+                collective_send(client, dest as u32, &buf, "scan", tag).await?;
             }
             (false, true) => {
-                let received = collective_recv_with_tag(client, source as u32, "scan", tag).await?;
+                let received = collective_recv(client, source as u32, "scan", tag).await?;
                 if received.len() != total_bytes {
                     return Err(NexarError::BufferSizeMismatch {
                         expected: total_bytes,
@@ -76,8 +79,14 @@ pub(crate) async unsafe fn inclusive_scan_with_tag(
     Ok(())
 }
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn exclusive_scan_with_tag(
+/// Exclusive prefix scan: rank `i` holds the reduction of ranks 0..i.
+///
+/// Rank 0 receives the identity element for the given operation.
+/// Implemented as inclusive scan followed by a left-shift exchange.
+///
+/// # Safety
+/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+pub(crate) async unsafe fn exclusive_scan(
     client: &NexarClient,
     ptr: u64,
     count: usize,
@@ -97,7 +106,7 @@ pub(crate) async unsafe fn exclusive_scan_with_tag(
     }
 
     // Run inclusive scan in-place.
-    unsafe { inclusive_scan_with_tag(client, ptr, count, dtype, op, tag).await? };
+    unsafe { inclusive_scan(client, ptr, count, dtype, op, tag).await? };
 
     // Shift results left by one rank.
     let inclusive_data = unsafe { client.adapter().stage_for_send(ptr, total_bytes)? };
@@ -108,8 +117,8 @@ pub(crate) async unsafe fn exclusive_scan_with_tag(
     match (should_send, should_recv) {
         (true, true) => {
             let (_, received) = tokio::try_join!(
-                collective_send_with_tag(client, (rank + 1) as u32, &inclusive_data, "exscan", tag),
-                collective_recv_with_tag(client, (rank - 1) as u32, "exscan", tag),
+                collective_send(client, (rank + 1) as u32, &inclusive_data, "exscan", tag),
+                collective_recv(client, (rank - 1) as u32, "exscan", tag),
             )?;
             if received.len() != total_bytes {
                 return Err(NexarError::BufferSizeMismatch {
@@ -120,14 +129,12 @@ pub(crate) async unsafe fn exclusive_scan_with_tag(
             unsafe { client.adapter().receive_to_device(&received, ptr)? };
         }
         (true, false) => {
-            collective_send_with_tag(client, (rank + 1) as u32, &inclusive_data, "exscan", tag)
-                .await?;
+            collective_send(client, (rank + 1) as u32, &inclusive_data, "exscan", tag).await?;
             let id = identity_slice(count, dtype, op)?;
             unsafe { client.adapter().receive_to_device(&id, ptr)? };
         }
         (false, true) => {
-            let received =
-                collective_recv_with_tag(client, (rank - 1) as u32, "exscan", tag).await?;
+            let received = collective_recv(client, (rank - 1) as u32, "exscan", tag).await?;
             if received.len() != total_bytes {
                 return Err(NexarError::BufferSizeMismatch {
                     expected: total_bytes,

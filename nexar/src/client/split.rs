@@ -44,7 +44,7 @@ impl NexarClient {
         let recv_ptr = all_info.as_mut_ptr() as u64;
         let tag = self.next_collective_tag();
         unsafe {
-            crate::collective::ring_allgather_with_tag(
+            crate::collective::ring_allgather(
                 self,
                 send_ptr,
                 recv_ptr,

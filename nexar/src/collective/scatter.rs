@@ -1,13 +1,18 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
 use crate::error::Result;
 use crate::types::{DataType, Rank};
 use futures::future::try_join_all;
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn scatter_with_tag(
+/// Scatter: root distributes one chunk to each rank.
+///
+/// Root sends the `i`-th chunk to rank `i`; non-root ranks receive their
+/// chunk from root.
+///
+/// # Safety
+/// - `send_ptr`: at least `count * world_size * dtype.size_in_bytes()` bytes on root.
+/// - `recv_ptr`: at least `count * dtype.size_in_bytes()` bytes on all ranks.
+pub(crate) async unsafe fn scatter(
     client: &NexarClient,
     send_ptr: u64,
     recv_ptr: u64,
@@ -40,13 +45,13 @@ pub(crate) async unsafe fn scatter_with_tag(
             .map(|r| {
                 let start = r as usize * chunk_bytes;
                 let chunk = &all_data[start..start + chunk_bytes];
-                collective_send_with_tag(client, r, chunk, "scatter", tag)
+                collective_send(client, r, chunk, "scatter", tag)
             })
             .collect();
 
         try_join_all(futs).await?;
     } else {
-        let received = collective_recv_with_tag(client, root, "scatter", tag).await?;
+        let received = collective_recv(client, root, "scatter", tag).await?;
         if received.len() != chunk_bytes {
             return Err(crate::error::NexarError::BufferSizeMismatch {
                 expected: chunk_bytes,

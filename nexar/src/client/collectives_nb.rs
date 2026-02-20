@@ -41,15 +41,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::ring_allreduce_with_tag(
-                    &client,
-                    ptr,
-                    count,
-                    dtype,
-                    op,
-                    Some(tag),
-                )
-                .await
+                crate::collective::ring_allreduce(&client, ptr, count, dtype, op, Some(tag)).await
             }
         })
     }
@@ -69,15 +61,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::tree_broadcast_with_tag(
-                    &client,
-                    ptr,
-                    count,
-                    dtype,
-                    root,
-                    Some(tag),
-                )
-                .await
+                crate::collective::tree_broadcast(&client, ptr, count, dtype, root, Some(tag)).await
             }
         })
     }
@@ -97,7 +81,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::ring_allgather_with_tag(
+                crate::collective::ring_allgather(
                     &client,
                     send_ptr,
                     recv_ptr,
@@ -126,7 +110,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::ring_reduce_scatter_with_tag(
+                crate::collective::ring_reduce_scatter(
                     &client,
                     send_ptr,
                     recv_ptr,
@@ -156,16 +140,8 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::tree_reduce_with_tag(
-                    &client,
-                    ptr,
-                    count,
-                    dtype,
-                    op,
-                    root,
-                    Some(tag),
-                )
-                .await
+                crate::collective::tree_reduce(&client, ptr, count, dtype, op, root, Some(tag))
+                    .await
             }
         })
     }
@@ -185,15 +161,8 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::alltoall_with_tag(
-                    &client,
-                    send_ptr,
-                    recv_ptr,
-                    count,
-                    dtype,
-                    Some(tag),
-                )
-                .await
+                crate::collective::alltoall(&client, send_ptr, recv_ptr, count, dtype, Some(tag))
+                    .await
             }
         })
     }
@@ -214,7 +183,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::gather_with_tag(
+                crate::collective::gather(
                     &client,
                     send_ptr,
                     recv_ptr,
@@ -244,7 +213,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::scatter_with_tag(
+                crate::collective::scatter(
                     &client,
                     send_ptr,
                     recv_ptr,
@@ -273,15 +242,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::exclusive_scan_with_tag(
-                    &client,
-                    ptr,
-                    count,
-                    dtype,
-                    op,
-                    Some(tag),
-                )
-                .await
+                crate::collective::exclusive_scan(&client, ptr, count, dtype, op, Some(tag)).await
             }
         })
     }
@@ -301,15 +262,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::inclusive_scan_with_tag(
-                    &client,
-                    ptr,
-                    count,
-                    dtype,
-                    op,
-                    Some(tag),
-                )
-                .await
+                crate::collective::inclusive_scan(&client, ptr, count, dtype, op, Some(tag)).await
             }
         })
     }
@@ -336,14 +289,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::allreduce_bucketed_with_tag(
-                    &client,
-                    &entries,
-                    dtype,
-                    op,
-                    Some(tag),
-                )
-                .await
+                crate::collective::allreduce_bucketed(&client, &entries, dtype, op, Some(tag)).await
             }
         })
     }
@@ -363,15 +309,7 @@ impl NexarClient {
         let tag = client.next_collective_tag();
         CollectiveHandle::spawn(async move {
             unsafe {
-                crate::collective::rs_ag_allreduce_with_tag(
-                    &client,
-                    ptr,
-                    count,
-                    dtype,
-                    op,
-                    Some(tag),
-                )
-                .await
+                crate::collective::rs_ag_allreduce(&client, ptr, count, dtype, op, Some(tag)).await
             }
         })
     }

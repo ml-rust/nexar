@@ -17,9 +17,7 @@ impl NexarClient {
         op: crate::types::ReduceOp,
     ) -> Result<()> {
         let tag = self.next_collective_tag();
-        unsafe {
-            crate::collective::ring_allreduce_with_tag(self, ptr, count, dtype, op, Some(tag)).await
-        }
+        unsafe { crate::collective::ring_allreduce(self, ptr, count, dtype, op, Some(tag)).await }
     }
 
     /// Broadcast from root rank to all others.
@@ -34,10 +32,7 @@ impl NexarClient {
         root: Rank,
     ) -> Result<()> {
         let tag = self.next_collective_tag();
-        unsafe {
-            crate::collective::tree_broadcast_with_tag(self, ptr, count, dtype, root, Some(tag))
-                .await
-        }
+        unsafe { crate::collective::tree_broadcast(self, ptr, count, dtype, root, Some(tag)).await }
     }
 
     /// AllGather: each rank contributes `count` elements, result is
@@ -55,15 +50,8 @@ impl NexarClient {
     ) -> Result<()> {
         let tag = self.next_collective_tag();
         unsafe {
-            crate::collective::ring_allgather_with_tag(
-                self,
-                send_ptr,
-                recv_ptr,
-                count,
-                dtype,
-                Some(tag),
-            )
-            .await
+            crate::collective::ring_allgather(self, send_ptr, recv_ptr, count, dtype, Some(tag))
+                .await
         }
     }
 
@@ -82,7 +70,7 @@ impl NexarClient {
     ) -> Result<()> {
         let tag = self.next_collective_tag();
         unsafe {
-            crate::collective::ring_reduce_scatter_with_tag(
+            crate::collective::ring_reduce_scatter(
                 self,
                 send_ptr,
                 recv_ptr,
@@ -109,8 +97,7 @@ impl NexarClient {
     ) -> Result<()> {
         let tag = self.next_collective_tag();
         unsafe {
-            crate::collective::tree_reduce_with_tag(self, ptr, count, dtype, op, root, Some(tag))
-                .await
+            crate::collective::tree_reduce(self, ptr, count, dtype, op, root, Some(tag)).await
         }
     }
 
@@ -128,8 +115,7 @@ impl NexarClient {
     ) -> Result<()> {
         let tag = self.next_collective_tag();
         unsafe {
-            crate::collective::alltoall_with_tag(self, send_ptr, recv_ptr, count, dtype, Some(tag))
-                .await
+            crate::collective::alltoall(self, send_ptr, recv_ptr, count, dtype, Some(tag)).await
         }
     }
 
@@ -148,16 +134,7 @@ impl NexarClient {
     ) -> Result<()> {
         let tag = self.next_collective_tag();
         unsafe {
-            crate::collective::gather_with_tag(
-                self,
-                send_ptr,
-                recv_ptr,
-                count,
-                dtype,
-                root,
-                Some(tag),
-            )
-            .await
+            crate::collective::gather(self, send_ptr, recv_ptr, count, dtype, root, Some(tag)).await
         }
     }
 
@@ -176,16 +153,8 @@ impl NexarClient {
     ) -> Result<()> {
         let tag = self.next_collective_tag();
         unsafe {
-            crate::collective::scatter_with_tag(
-                self,
-                send_ptr,
-                recv_ptr,
-                count,
-                dtype,
-                root,
-                Some(tag),
-            )
-            .await
+            crate::collective::scatter(self, send_ptr, recv_ptr, count, dtype, root, Some(tag))
+                .await
         }
     }
 
@@ -202,9 +171,7 @@ impl NexarClient {
         op: crate::types::ReduceOp,
     ) -> Result<()> {
         let tag = self.next_collective_tag();
-        unsafe {
-            crate::collective::exclusive_scan_with_tag(self, ptr, count, dtype, op, Some(tag)).await
-        }
+        unsafe { crate::collective::exclusive_scan(self, ptr, count, dtype, op, Some(tag)).await }
     }
 
     /// Inclusive prefix scan: rank `i` holds the reduction of ranks 0..=i.
@@ -219,9 +186,7 @@ impl NexarClient {
         op: crate::types::ReduceOp,
     ) -> Result<()> {
         let tag = self.next_collective_tag();
-        unsafe {
-            crate::collective::inclusive_scan_with_tag(self, ptr, count, dtype, op, Some(tag)).await
-        }
+        unsafe { crate::collective::inclusive_scan(self, ptr, count, dtype, op, Some(tag)).await }
     }
 
     /// Barrier: block until all ranks reach this point.
@@ -244,10 +209,7 @@ impl NexarClient {
         op: crate::types::ReduceOp,
     ) -> Result<()> {
         let tag = self.next_collective_tag();
-        unsafe {
-            crate::collective::allreduce_bucketed_with_tag(self, entries, dtype, op, Some(tag))
-                .await
-        }
+        unsafe { crate::collective::allreduce_bucketed(self, entries, dtype, op, Some(tag)).await }
     }
 
     /// Allreduce via reduce-scatter + allgather decomposition.
@@ -265,10 +227,7 @@ impl NexarClient {
         op: crate::types::ReduceOp,
     ) -> Result<()> {
         let tag = self.next_collective_tag();
-        unsafe {
-            crate::collective::rs_ag_allreduce_with_tag(self, ptr, count, dtype, op, Some(tag))
-                .await
-        }
+        unsafe { crate::collective::rs_ag_allreduce(self, ptr, count, dtype, op, Some(tag)).await }
     }
 
     /// Compressed allreduce: bandwidth-efficient allreduce with gradient compression.

@@ -1,13 +1,18 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn ring_reduce_scatter_with_tag(
+/// Ring reduce-scatter: reduce across all ranks, each rank gets a different slice.
+///
+/// Uses N-1 ring rounds. After completion, rank `i` holds the reduction of
+/// the `i`-th chunk from all ranks.
+///
+/// # Safety
+/// - `send_ptr`: at least `count * world_size * dtype.size_in_bytes()` bytes.
+/// - `recv_ptr`: at least `count * dtype.size_in_bytes()` bytes.
+pub(crate) async unsafe fn ring_reduce_scatter(
     client: &NexarClient,
     send_ptr: u64,
     recv_ptr: u64,
@@ -45,8 +50,8 @@ pub(crate) async unsafe fn ring_reduce_scatter_with_tag(
         let send_data = buf[send_off..send_off + chunk_bytes].to_vec();
 
         let (_, received) = tokio::try_join!(
-            collective_send_with_tag(client, next as u32, &send_data, "reduce_scatter", tag),
-            collective_recv_with_tag(client, prev as u32, "reduce_scatter", tag),
+            collective_send(client, next as u32, &send_data, "reduce_scatter", tag),
+            collective_recv(client, prev as u32, "reduce_scatter", tag),
         )?;
 
         if received.len() != chunk_bytes {

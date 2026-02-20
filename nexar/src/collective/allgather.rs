@@ -1,12 +1,18 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::types::DataType;
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn ring_allgather_with_tag(
+/// Ring allgather: each rank contributes `count` elements, result is all
+/// contributions concatenated in rank order.
+///
+/// Uses N-1 ring rounds where each rank forwards the latest received chunk
+/// to its successor.
+///
+/// # Safety
+/// - `send_ptr` must point to at least `count * dtype.size_in_bytes()` bytes.
+/// - `recv_ptr` must point to at least `count * world_size * dtype.size_in_bytes()` bytes.
+pub(crate) async unsafe fn ring_allgather(
     client: &NexarClient,
     send_ptr: u64,
     recv_ptr: u64,
@@ -45,8 +51,8 @@ pub(crate) async unsafe fn ring_allgather_with_tag(
         let send_data = buf[send_idx * chunk_bytes..(send_idx + 1) * chunk_bytes].to_vec();
 
         let (_, received) = tokio::try_join!(
-            collective_send_with_tag(client, next as u32, &send_data, "allgather", tag),
-            collective_recv_with_tag(client, prev as u32, "allgather", tag),
+            collective_send(client, next as u32, &send_data, "allgather", tag),
+            collective_recv(client, prev as u32, "allgather", tag),
         )?;
 
         if received.len() != chunk_bytes {

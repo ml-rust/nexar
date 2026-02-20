@@ -1,13 +1,17 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, Rank, ReduceOp};
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn tree_reduce_with_tag(
+/// Tree reduce: reduce data from all ranks to a single root rank.
+///
+/// Uses a binomial tree algorithm with O(log N) steps. Handles non-power-of-2
+/// world sizes by first reducing excess ranks into the lower power-of-2 set.
+///
+/// # Safety
+/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+pub(crate) async unsafe fn tree_reduce(
     client: &NexarClient,
     ptr: u64,
     count: usize,
@@ -43,7 +47,7 @@ pub(crate) async unsafe fn tree_reduce_with_tag(
     if vrank < excess {
         let partner_vrank = vrank + p2;
         let partner_real = (partner_vrank + root) % world;
-        let received = collective_recv_with_tag(client, partner_real as u32, "reduce", tag).await?;
+        let received = collective_recv(client, partner_real as u32, "reduce", tag).await?;
         if received.len() != total_bytes {
             return Err(NexarError::BufferSizeMismatch {
                 expected: total_bytes,
@@ -54,7 +58,7 @@ pub(crate) async unsafe fn tree_reduce_with_tag(
     } else if vrank >= p2 {
         let partner_vrank = vrank - p2;
         let partner_real = (partner_vrank + root) % world;
-        collective_send_with_tag(client, partner_real as u32, &buf, "reduce", tag).await?;
+        collective_send(client, partner_real as u32, &buf, "reduce", tag).await?;
         participating = false;
     }
 
@@ -67,15 +71,14 @@ pub(crate) async unsafe fn tree_reduce_with_tag(
             if adjusted_vrank & mask != 0 {
                 let partner_vrank = adjusted_vrank ^ mask;
                 let partner_real = (partner_vrank + root) % world;
-                collective_send_with_tag(client, partner_real as u32, &buf, "reduce", tag).await?;
+                collective_send(client, partner_real as u32, &buf, "reduce", tag).await?;
                 break;
             } else {
                 let partner_vrank = adjusted_vrank ^ mask;
                 if partner_vrank < p2 {
                     let partner_real = (partner_vrank + root) % world;
                     let received =
-                        collective_recv_with_tag(client, partner_real as u32, "reduce", tag)
-                            .await?;
+                        collective_recv(client, partner_real as u32, "reduce", tag).await?;
                     if received.len() != total_bytes {
                         return Err(NexarError::BufferSizeMismatch {
                             expected: total_bytes,

@@ -1,7 +1,5 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{
-    ChunkLayout, CollectiveTag, collective_recv_with_tag, collective_send_with_tag,
-};
+use crate::collective::helpers::{ChunkLayout, CollectiveTag, collective_recv, collective_send};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
@@ -9,8 +7,16 @@ use crate::types::{DataType, ReduceOp};
 // Algorithm thresholds are read from client.config().large_msg_bytes
 // and client.config().ring_max_world at runtime.
 
-/// Tagged variant for non-blocking collectives.
-pub(crate) async unsafe fn ring_allreduce_with_tag(
+/// Ring allreduce: in-place reduce across all ranks.
+///
+/// Dispatches to the optimal algorithm based on message size and world size:
+/// - Large messages (>= `large_msg_bytes`): pipelined ring (bandwidth-optimal)
+/// - Small world (<= `ring_max_world`): basic ring (lower constant overhead)
+/// - Large world, small message: halving-doubling (latency-optimal, O(log N) steps)
+///
+/// # Safety
+/// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+pub(crate) async unsafe fn ring_allreduce(
     client: &NexarClient,
     ptr: u64,
     count: usize,
@@ -97,8 +103,8 @@ async unsafe fn ring_allreduce_impl(
         let send_snapshot = buf[send_off..send_off + send_len].to_vec();
 
         let (_, received) = tokio::try_join!(
-            collective_send_with_tag(client, next as u32, &send_snapshot, "allreduce", tag),
-            collective_recv_with_tag(client, prev as u32, "allreduce", tag),
+            collective_send(client, next as u32, &send_snapshot, "allreduce", tag),
+            collective_recv(client, prev as u32, "allreduce", tag),
         )?;
 
         if received.len() != recv_len {
@@ -127,8 +133,8 @@ async unsafe fn ring_allreduce_impl(
         let send_snapshot = buf[send_off..send_off + send_len].to_vec();
 
         let (_, received) = tokio::try_join!(
-            collective_send_with_tag(client, next as u32, &send_snapshot, "allreduce", tag),
-            collective_recv_with_tag(client, prev as u32, "allreduce", tag),
+            collective_send(client, next as u32, &send_snapshot, "allreduce", tag),
+            collective_recv(client, prev as u32, "allreduce", tag),
         )?;
 
         if received.len() != recv_len {
@@ -191,7 +197,7 @@ async unsafe fn halving_doubling_allreduce(
     if rank < excess {
         // This rank receives from its excess partner.
         let partner = rank + p2;
-        let received = collective_recv_with_tag(client, partner as u32, "allreduce", tag).await?;
+        let received = collective_recv(client, partner as u32, "allreduce", tag).await?;
         if received.len() != total_bytes {
             return Err(NexarError::BufferSizeMismatch {
                 expected: total_bytes,
@@ -203,7 +209,7 @@ async unsafe fn halving_doubling_allreduce(
     } else if rank >= p2 {
         // This is an excess rank — send data and wait.
         let partner = rank - p2;
-        collective_send_with_tag(client, partner as u32, &buf, "allreduce", tag).await?;
+        collective_send(client, partner as u32, &buf, "allreduce", tag).await?;
         // Will receive result from partner after the algorithm completes.
     } else {
         // rank in [excess..p2) — participates directly.
@@ -246,8 +252,8 @@ async unsafe fn halving_doubling_allreduce(
             let send_data = buf[send_off..send_off + send_bytes].to_vec();
 
             let (_, received) = tokio::try_join!(
-                collective_send_with_tag(client, partner_real as u32, &send_data, "allreduce", tag),
-                collective_recv_with_tag(client, partner_real as u32, "allreduce", tag),
+                collective_send(client, partner_real as u32, &send_data, "allreduce", tag),
+                collective_recv(client, partner_real as u32, "allreduce", tag),
             )?;
 
             if received.len() != keep_bytes {
@@ -279,8 +285,8 @@ async unsafe fn halving_doubling_allreduce(
             let send_data = buf[send_off..send_off + send_bytes].to_vec();
 
             let (_, received) = tokio::try_join!(
-                collective_send_with_tag(client, partner_real as u32, &send_data, "allreduce", tag),
-                collective_recv_with_tag(client, partner_real as u32, "allreduce", tag),
+                collective_send(client, partner_real as u32, &send_data, "allreduce", tag),
+                collective_recv(client, partner_real as u32, "allreduce", tag),
             )?;
 
             // Place received data in the partner's portion.
@@ -308,10 +314,10 @@ async unsafe fn halving_doubling_allreduce(
     // Step 3: Send results back to excess ranks.
     if rank < excess {
         let partner = rank + p2;
-        collective_send_with_tag(client, partner as u32, &buf, "allreduce", tag).await?;
+        collective_send(client, partner as u32, &buf, "allreduce", tag).await?;
     } else if rank >= p2 {
         let partner = rank - p2;
-        let received = collective_recv_with_tag(client, partner as u32, "allreduce", tag).await?;
+        let received = collective_recv(client, partner as u32, "allreduce", tag).await?;
         if received.len() != total_bytes {
             return Err(NexarError::BufferSizeMismatch {
                 expected: total_bytes,
