@@ -63,6 +63,40 @@ pub trait DeviceAdapter: Send + Sync {
         Ok(buf)
     }
 
+    /// Async D2H copy on a specific CUDA stream.
+    ///
+    /// Default: delegates to synchronous `stage_for_send` (ignores stream).
+    /// GPU adapters should override to use async copies for compute/comms overlap.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid pointer to at least `size_bytes` bytes.
+    /// `stream` must be a valid CUDA stream handle (or 0 for default stream).
+    unsafe fn stage_for_send_on_stream(
+        &self,
+        ptr: u64,
+        size_bytes: usize,
+        _stream: u64,
+    ) -> Result<Vec<u8>> {
+        unsafe { self.stage_for_send(ptr, size_bytes) }
+    }
+
+    /// Async H2D copy on a specific CUDA stream.
+    ///
+    /// Default: delegates to synchronous `receive_to_device` (ignores stream).
+    /// GPU adapters should override to use async copies for compute/comms overlap.
+    ///
+    /// # Safety
+    /// `dst_ptr` must be a valid pointer to at least `data.len()` bytes.
+    /// `stream` must be a valid CUDA stream handle (or 0 for default stream).
+    unsafe fn receive_to_device_on_stream(
+        &self,
+        data: &[u8],
+        dst_ptr: u64,
+        _stream: u64,
+    ) -> Result<()> {
+        unsafe { self.receive_to_device(data, dst_ptr) }
+    }
+
     /// Scatter received contiguous data into multiple non-contiguous device regions.
     ///
     /// Default implementation calls `receive_to_device` per region from successive
