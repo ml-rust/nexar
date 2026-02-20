@@ -40,8 +40,12 @@ pub enum NexarError {
     #[error("invalid rank {rank}: world size is {world_size}")]
     InvalidRank { rank: Rank, world_size: u32 },
 
-    #[error("QUIC transport error: {0}")]
-    Transport(String),
+    #[error("QUIC transport error: {message}")]
+    Transport {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("TLS configuration error: {0}")]
     Tls(String),
@@ -55,8 +59,12 @@ pub enum NexarError {
     #[error("RPC call to rank {rank} failed: {reason}")]
     RpcFailed { rank: Rank, reason: String },
 
-    #[error("device adapter error: {0}")]
-    DeviceError(String),
+    #[error("device adapter error: {message}")]
+    DeviceError {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     #[error("{operation} failed at rank {rank}: {reason}")]
     CollectiveFailed {
@@ -67,6 +75,49 @@ pub enum NexarError {
 
     #[error("operation cancelled")]
     Cancelled,
+
+    #[error("cluster token mismatch: bootstrap authentication failed")]
+    ClusterTokenMismatch,
+}
+
+impl NexarError {
+    /// Create a `Transport` error with just a message.
+    pub fn transport(msg: impl Into<String>) -> Self {
+        Self::Transport {
+            message: msg.into(),
+            source: None,
+        }
+    }
+
+    /// Create a `Transport` error with a message and a source error.
+    pub fn transport_with_source(
+        msg: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Transport {
+            message: msg.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// Create a `DeviceError` with just a message.
+    pub fn device(msg: impl Into<String>) -> Self {
+        Self::DeviceError {
+            message: msg.into(),
+            source: None,
+        }
+    }
+
+    /// Create a `DeviceError` with a message and a source error.
+    pub fn device_with_source(
+        msg: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::DeviceError {
+            message: msg.into(),
+            source: Some(Box::new(source)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -147,14 +198,14 @@ mod tests {
                 rank: 5,
                 world_size: 4,
             },
-            NexarError::Transport("conn reset".into()),
+            NexarError::transport("conn reset"),
             NexarError::Tls("bad cert".into()),
             NexarError::RpcNotRegistered { fn_id: 42 },
             NexarError::RpcFailed {
                 rank: 1,
                 reason: "timeout".into(),
             },
-            NexarError::DeviceError("oom".into()),
+            NexarError::device("oom"),
             NexarError::CollectiveFailed {
                 operation: "allreduce",
                 rank: 2,
