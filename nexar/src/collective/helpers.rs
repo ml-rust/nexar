@@ -56,8 +56,10 @@ impl ChunkLayout {
     }
 }
 
-/// Default timeout for individual send/recv operations within collectives.
-pub(crate) const COLLECTIVE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Get the collective timeout from the client's config.
+pub(crate) fn collective_timeout(client: &NexarClient) -> Duration {
+    client.config.collective_timeout
+}
 
 /// Receive bytes using best available transport (RDMA then QUIC) with timeout.
 ///
@@ -69,12 +71,8 @@ pub(crate) async fn collective_recv_best_effort(
     expected_size: usize,
     operation: &'static str,
 ) -> Result<PooledBuf> {
-    match tokio::time::timeout(
-        COLLECTIVE_TIMEOUT,
-        client.recv_bytes_best_effort(src, expected_size),
-    )
-    .await
-    {
+    let timeout = collective_timeout(client);
+    match tokio::time::timeout(timeout, client.recv_bytes_best_effort(src, expected_size)).await {
         Ok(Ok(buf)) => Ok(buf),
         Ok(Err(e)) => Err(NexarError::CollectiveFailed {
             operation,
@@ -84,7 +82,7 @@ pub(crate) async fn collective_recv_best_effort(
         Err(_) => Err(NexarError::CollectiveFailed {
             operation,
             rank: src,
-            reason: format!("recv timed out after {}s", COLLECTIVE_TIMEOUT.as_secs()),
+            reason: format!("recv timed out after {}s", timeout.as_secs()),
         }),
     }
 }
@@ -123,21 +121,12 @@ pub(crate) async fn collective_send_with_tag(
     operation: &'static str,
     tag: CollectiveTag,
 ) -> Result<()> {
+    let timeout = collective_timeout(client);
     let result = match tag {
         Some(t) => {
-            tokio::time::timeout(
-                COLLECTIVE_TIMEOUT,
-                client.send_bytes_tagged_best_effort(dest, t, data),
-            )
-            .await
+            tokio::time::timeout(timeout, client.send_bytes_tagged_best_effort(dest, t, data)).await
         }
-        None => {
-            tokio::time::timeout(
-                COLLECTIVE_TIMEOUT,
-                client.send_bytes_best_effort(dest, data),
-            )
-            .await
-        }
+        None => tokio::time::timeout(timeout, client.send_bytes_best_effort(dest, data)).await,
     };
     match result {
         Ok(Ok(())) => Ok(()),
@@ -149,7 +138,7 @@ pub(crate) async fn collective_send_with_tag(
         Err(_) => Err(NexarError::CollectiveFailed {
             operation,
             rank: dest,
-            reason: format!("send timed out after {}s", COLLECTIVE_TIMEOUT.as_secs()),
+            reason: format!("send timed out after {}s", timeout.as_secs()),
         }),
     }
 }
@@ -161,15 +150,12 @@ pub(crate) async fn collective_recv_with_tag(
     operation: &'static str,
     tag: CollectiveTag,
 ) -> Result<PooledBuf> {
+    let timeout = collective_timeout(client);
     let result = match tag {
         Some(t) => {
-            tokio::time::timeout(
-                COLLECTIVE_TIMEOUT,
-                client.recv_bytes_tagged_best_effort(src, t, 0),
-            )
-            .await
+            tokio::time::timeout(timeout, client.recv_bytes_tagged_best_effort(src, t, 0)).await
         }
-        None => tokio::time::timeout(COLLECTIVE_TIMEOUT, client.recv_bytes(src)).await,
+        None => tokio::time::timeout(timeout, client.recv_bytes(src)).await,
     };
     match result {
         Ok(Ok(buf)) => Ok(buf),
@@ -181,7 +167,7 @@ pub(crate) async fn collective_recv_with_tag(
         Err(_) => Err(NexarError::CollectiveFailed {
             operation,
             rank: src,
-            reason: format!("recv timed out after {}s", COLLECTIVE_TIMEOUT.as_secs()),
+            reason: format!("recv timed out after {}s", timeout.as_secs()),
         }),
     }
 }

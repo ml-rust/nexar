@@ -26,9 +26,8 @@ pub async unsafe fn ring_allreduce(
     unsafe { ring_allreduce_with_tag(client, ptr, count, dtype, op, None).await }
 }
 
-/// Adaptive algorithm thresholds.
-const LARGE_MSG_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
-const RING_MAX_WORLD: usize = 8;
+// Algorithm thresholds are read from client.config().large_msg_bytes
+// and client.config().ring_max_world at runtime.
 
 /// Tagged variant for non-blocking collectives.
 pub(crate) async unsafe fn ring_allreduce_with_tag(
@@ -42,7 +41,8 @@ pub(crate) async unsafe fn ring_allreduce_with_tag(
     let world = client.world_size() as usize;
     let total_bytes = count * dtype.size_in_bytes();
 
-    if total_bytes >= LARGE_MSG_BYTES {
+    let cfg = client.config();
+    if total_bytes >= cfg.large_msg_bytes {
         // Large messages: pipelined ring is bandwidth-optimal.
         unsafe {
             crate::collective::pipelined_allreduce::pipelined_ring_allreduce(
@@ -50,7 +50,7 @@ pub(crate) async unsafe fn ring_allreduce_with_tag(
             )
             .await
         }
-    } else if world <= RING_MAX_WORLD {
+    } else if world <= cfg.ring_max_world {
         // Small world: ring has lower constant overhead and handles
         // non-power-of-2 world sizes without the excess-rank exchange
         // that halving-doubling requires.
@@ -116,12 +116,10 @@ async unsafe fn ring_allreduce_impl(
         // Send and recv operate on different chunks, so this is safe.
         let send_snapshot = buf[send_off..send_off + send_len].to_vec();
 
-        let (send_result, recv_result) = tokio::join!(
+        let (_, received) = tokio::try_join!(
             collective_send_with_tag(client, next as u32, &send_snapshot, "allreduce", tag),
             collective_recv_with_tag(client, prev as u32, "allreduce", tag),
-        );
-        send_result?;
-        let received = recv_result?;
+        )?;
 
         if received.len() != recv_len {
             return Err(NexarError::BufferSizeMismatch {
@@ -144,16 +142,14 @@ async unsafe fn ring_allreduce_impl(
         let recv_len = layout.chunk_count(recv_idx) * elem_size;
 
         // In allgather, send chunk is already fully reduced and won't be
-        // modified by recv. Still need to copy because tokio::join! borrows
+        // modified by recv. Still need to copy because tokio::try_join! borrows
         // the future args, and we can't split borrow buf in safe Rust.
         let send_snapshot = buf[send_off..send_off + send_len].to_vec();
 
-        let (send_result, recv_result) = tokio::join!(
+        let (_, received) = tokio::try_join!(
             collective_send_with_tag(client, next as u32, &send_snapshot, "allreduce", tag),
             collective_recv_with_tag(client, prev as u32, "allreduce", tag),
-        );
-        send_result?;
-        let received = recv_result?;
+        )?;
 
         if received.len() != recv_len {
             return Err(NexarError::BufferSizeMismatch {
@@ -269,12 +265,10 @@ async unsafe fn halving_doubling_allreduce(
 
             let send_data = buf[send_off..send_off + send_bytes].to_vec();
 
-            let (send_result, recv_result) = tokio::join!(
+            let (_, received) = tokio::try_join!(
                 collective_send_with_tag(client, partner_real as u32, &send_data, "allreduce", tag),
                 collective_recv_with_tag(client, partner_real as u32, "allreduce", tag),
-            );
-            send_result?;
-            let received = recv_result?;
+            )?;
 
             if received.len() != keep_bytes {
                 return Err(NexarError::BufferSizeMismatch {
@@ -304,12 +298,10 @@ async unsafe fn halving_doubling_allreduce(
 
             let send_data = buf[send_off..send_off + send_bytes].to_vec();
 
-            let (send_result, recv_result) = tokio::join!(
+            let (_, received) = tokio::try_join!(
                 collective_send_with_tag(client, partner_real as u32, &send_data, "allreduce", tag),
                 collective_recv_with_tag(client, partner_real as u32, "allreduce", tag),
-            );
-            send_result?;
-            let received = recv_result?;
+            )?;
 
             // Place received data in the partner's portion.
             let (new_start, new_len) = if vrank < partner_vrank {

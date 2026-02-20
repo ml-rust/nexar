@@ -160,7 +160,7 @@ impl NexarClient {
 
     /// Barrier: block until all ranks reach this point.
     pub async fn barrier(&self) -> Result<()> {
-        crate::collective::barrier(self, std::time::Duration::from_secs(30)).await
+        crate::collective::barrier(self, self.config.barrier_timeout).await
     }
 
     /// Bucketed allreduce: fuse multiple small tensors into one allreduce.

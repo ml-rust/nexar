@@ -318,7 +318,7 @@ impl NexarClient {
     pub fn barrier_nb(self: &Arc<Self>) -> CollectiveHandle {
         let client = Arc::clone(self);
         CollectiveHandle::spawn(async move {
-            crate::collective::barrier(&client, std::time::Duration::from_secs(30)).await
+            crate::collective::barrier(&client, client.config.barrier_timeout).await
         })
     }
 

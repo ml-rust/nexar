@@ -16,8 +16,7 @@ use crate::types::{DataType, ReduceOp};
 // as `LARGE_MSG_BYTES` (8 MiB). This module only contains the pipeline
 // segment size used within the algorithm.
 
-/// Segment size for pipeline stages.
-const PIPELINE_SEGMENT_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
+// Segment size is read from client.config().pipeline_segment_bytes at runtime.
 
 /// Pack pipeline metadata into a single tag for tagged transport.
 ///
@@ -78,6 +77,7 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
 
     let elem_size = dtype.size_in_bytes();
     let total_bytes = count * elem_size;
+    let pipeline_segment_bytes = client.config().pipeline_segment_bytes;
 
     let data = unsafe { client.adapter().stage_for_send(ptr, total_bytes)? };
     let mut buf = data;
@@ -101,7 +101,7 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
         let recv_count = layout.chunk_count(recv_idx);
         let recv_bytes = recv_count * elem_size;
 
-        let num_segs = recv_bytes.max(send_bytes).div_ceil(PIPELINE_SEGMENT_BYTES);
+        let num_segs = recv_bytes.max(send_bytes).div_ceil(pipeline_segment_bytes);
         let num_segs = num_segs.max(1);
 
         if num_segs <= 1 {
@@ -110,12 +110,10 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
             let send_data = buf[send_byte_off..send_byte_off + send_bytes].to_vec();
             let step_tag = Some(pack_tag(outer_tag, 0, step as u16, 0));
 
-            let (sr, rr) = tokio::join!(
+            let (_, received) = tokio::try_join!(
                 collective_send_with_tag(client, next as u32, &send_data, "allreduce", step_tag),
                 collective_recv_with_tag(client, prev as u32, "allreduce", step_tag),
-            );
-            sr?;
-            let received = rr?;
+            )?;
 
             if received.len() != recv_bytes {
                 return Err(NexarError::BufferSizeMismatch {
@@ -138,12 +136,10 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
         let send_data_0 = buf[s0_byte_off..s0_byte_off + s0_byte_len].to_vec();
         let tag_0 = Some(pack_tag(outer_tag, 0, step as u16, 0));
 
-        let (sr, rr) = tokio::join!(
+        let (_, mut prev_received) = tokio::try_join!(
             collective_send_with_tag(client, next as u32, &send_data_0, "allreduce", tag_0),
             collective_recv_with_tag(client, prev as u32, "allreduce", tag_0),
-        );
-        sr?;
-        let mut prev_received = rr?;
+        )?;
 
         // Pipeline loop: reduce seg[k-1] while sending/receiving seg[k].
         for seg in 1..num_segs {
@@ -174,12 +170,11 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
             let send_data_k = buf[sk_byte_off..sk_byte_off + sk_byte_len].to_vec();
             let tag_k = Some(pack_tag(outer_tag, 0, step as u16, seg as u16));
 
-            let (sr, rr) = tokio::join!(
+            let (_, r) = tokio::try_join!(
                 collective_send_with_tag(client, next as u32, &send_data_k, "allreduce", tag_k,),
                 collective_recv_with_tag(client, prev as u32, "allreduce", tag_k),
-            );
-            sr?;
-            prev_received = rr?;
+            )?;
+            prev_received = r;
         }
 
         // Drain: reduce final segment.
@@ -215,7 +210,7 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
         let recv_count_r = layout.chunk_count(recv_idx);
         let recv_bytes = recv_count_r * elem_size;
 
-        let num_segs = recv_bytes.max(send_bytes).div_ceil(PIPELINE_SEGMENT_BYTES);
+        let num_segs = recv_bytes.max(send_bytes).div_ceil(pipeline_segment_bytes);
         let num_segs = num_segs.max(1);
 
         if num_segs <= 1 {
@@ -223,12 +218,10 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
             let send_data = buf[send_byte_off..send_byte_off + send_bytes].to_vec();
             let step_tag = Some(pack_tag(outer_tag, 1, step as u16, 0));
 
-            let (sr, rr) = tokio::join!(
+            let (_, received) = tokio::try_join!(
                 collective_send_with_tag(client, next as u32, &send_data, "allreduce", step_tag),
                 collective_recv_with_tag(client, prev as u32, "allreduce", step_tag),
-            );
-            sr?;
-            let received = rr?;
+            )?;
 
             if received.len() != recv_bytes {
                 return Err(NexarError::BufferSizeMismatch {
@@ -249,12 +242,10 @@ pub(crate) async unsafe fn pipelined_ring_allreduce(
             let send_data = buf[sk_byte_off..sk_byte_off + sk_byte_len].to_vec();
             let tag_k = Some(pack_tag(outer_tag, 1, step as u16, seg as u16));
 
-            let (sr, rr) = tokio::join!(
+            let (_, received) = tokio::try_join!(
                 collective_send_with_tag(client, next as u32, &send_data, "allreduce", tag_k),
                 collective_recv_with_tag(client, prev as u32, "allreduce", tag_k),
-            );
-            sr?;
-            let received = rr?;
+            )?;
 
             let (rk_off, rk_len) = segment_range(recv_off, recv_count_r, seg, num_segs, elem_size);
             let rk_byte_off = rk_off * elem_size;
