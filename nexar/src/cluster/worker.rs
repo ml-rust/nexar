@@ -35,7 +35,13 @@ impl WorkerNode {
         let client_config = make_bootstrap_client_config()?;
 
         // Bind a local UDP socket.
-        let bind_addr: SocketAddr = "0.0.0.0:0".parse().expect("hardcoded socket addr");
+        let bind_addr: SocketAddr = if seed_addr.is_ipv4() {
+            "127.0.0.1:0"
+        } else {
+            "[::1]:0"
+        }
+        .parse()
+        .expect("hardcoded socket addr");
         let mut endpoint = quinn::Endpoint::client(bind_addr)
             .map_err(|e| NexarError::transport_with_source("bind client", e))?;
         endpoint.set_default_client_config(client_config);

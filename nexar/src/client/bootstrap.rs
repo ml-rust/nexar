@@ -156,7 +156,7 @@ async fn build_mesh(
 
             pair_futures.push(tokio::spawn(async move {
                 let mut endpoint =
-                    quinn::Endpoint::client("0.0.0.0:0".parse().expect("hardcoded socket addr"))
+                    quinn::Endpoint::client("127.0.0.1:0".parse().expect("hardcoded socket addr"))
                         .map_err(|e| NexarError::transport_with_source("mesh client", e))?;
                 endpoint.set_default_client_config(config_i);
 
@@ -275,7 +275,7 @@ async fn build_mesh_with_config(
 
             pair_futures.push(tokio::spawn(async move {
                 let mut endpoint =
-                    quinn::Endpoint::client("0.0.0.0:0".parse().expect("hardcoded socket addr"))
+                    quinn::Endpoint::client("127.0.0.1:0".parse().expect("hardcoded socket addr"))
                         .map_err(|e| NexarError::transport_with_source("mesh client", e))?;
                 endpoint.set_default_client_config(config_i);
 
