@@ -2,7 +2,9 @@ use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
 use crate::protocol::codec::decode_message;
 use crate::transport::buffer_pool::{BufferPool, PooledBuf};
-use crate::transport::connection::{STREAM_TAG_FRAMED, STREAM_TAG_RAW, STREAM_TAG_RAW_COMM};
+use crate::transport::connection::{
+    STREAM_TAG_FRAMED, STREAM_TAG_RAW, STREAM_TAG_RAW_COMM, STREAM_TAG_RAW_TAGGED,
+};
 use crate::types::Rank;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,11 +38,25 @@ pub struct PeerRouter {
     pub raw: Mutex<mpsc::Receiver<PooledBuf>>,
     /// Per-comm_id raw channels for split communicators.
     raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>>,
+    /// Per-tag raw channels for concurrent collectives.
+    /// Channels are lazily created when tagged data arrives or when
+    /// `register_tag` is called, whichever comes first.
+    tagged: Arc<Mutex<HashMap<u64, TaggedChannel>>>,
 }
 
 /// A registered communicator channel with sender.
 struct CommChannel {
     tx: mpsc::Sender<PooledBuf>,
+}
+
+/// A tagged channel. Lazily created when either a message arrives or
+/// `register_tag` is called. Both sides (router sender and client receiver)
+/// get the same underlying channel.
+struct TaggedChannel {
+    tx: mpsc::Sender<PooledBuf>,
+    /// The receiver, stored here until claimed by `register_tag`.
+    /// Once claimed, this is `None`.
+    rx: Option<mpsc::Receiver<PooledBuf>>,
 }
 
 /// Senders held by the background receive loop. Cloned into per-stream tasks.
@@ -53,6 +69,7 @@ struct RouterSenders {
     data: mpsc::Sender<NexarMessage>,
     raw: mpsc::Sender<PooledBuf>,
     raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>>,
+    tagged: Arc<Mutex<HashMap<u64, TaggedChannel>>>,
     pool: Arc<BufferPool>,
 }
 
@@ -72,6 +89,7 @@ impl PeerRouter {
             Arc::new(Mutex::new(HashMap::new()));
 
         let raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>> = Arc::new(Mutex::new(HashMap::new()));
+        let tagged: Arc<Mutex<HashMap<u64, TaggedChannel>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let senders = RouterSenders {
             rank,
@@ -81,6 +99,7 @@ impl PeerRouter {
             data: data_tx,
             raw: raw_tx,
             raw_comms: Arc::clone(&raw_comms),
+            tagged: Arc::clone(&tagged),
             pool,
         };
 
@@ -93,6 +112,7 @@ impl PeerRouter {
             data: Mutex::new(data_rx),
             raw: Mutex::new(raw_rx),
             raw_comms,
+            tagged,
         };
 
         (router, handle)
@@ -149,6 +169,32 @@ impl PeerRouter {
             .ok_or(NexarError::PeerDisconnected { rank })
     }
 
+    /// Register a tagged channel and return the receiver.
+    ///
+    /// If the channel was already created (by a message arriving first),
+    /// the existing receiver is returned. Otherwise, a new channel is created.
+    pub async fn register_tag(&self, tag: u64) -> mpsc::Receiver<PooledBuf> {
+        let mut tags = self.tagged.lock().await;
+        if let Some(ch) = tags.get_mut(&tag) {
+            // Channel exists (created by router when a message arrived).
+            // Take the receiver if we haven't already.
+            if let Some(rx) = ch.rx.take() {
+                return rx;
+            }
+            // Receiver already claimed — create a fresh channel.
+            // This shouldn't normally happen.
+        }
+        // Create a new channel.
+        let (tx, rx) = mpsc::channel(LANE_CAPACITY);
+        tags.insert(tag, TaggedChannel { tx, rx: None });
+        rx
+    }
+
+    /// Remove a previously registered tag channel.
+    pub async fn remove_tag(&self, tag: u64) {
+        self.tagged.lock().await.remove(&tag);
+    }
+
     /// Receive raw bytes from the raw lane (default comm_id 0).
     pub async fn recv_raw(&self, rank: Rank) -> Result<PooledBuf> {
         self.raw
@@ -173,10 +219,9 @@ async fn accept_loop(conn: quinn::Connection, tx: RouterSenders) -> Result<()> {
             }
         };
 
-        let permit = Arc::clone(&semaphore)
-            .acquire_owned()
-            .await
-            .expect("semaphore is never closed");
+        let Ok(permit) = Arc::clone(&semaphore).acquire_owned().await else {
+            return Ok(()); // Semaphore closed, exit gracefully
+        };
 
         let tx = tx.clone();
         tokio::spawn(async move {
@@ -212,6 +257,30 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
             };
             if tx.raw.send(buf).await.is_err() {
                 tracing::warn!(rank = tx.rank, "router: raw receiver dropped");
+            }
+        }
+        STREAM_TAG_RAW_TAGGED => {
+            // Read 8-byte tag, then length-prefixed payload.
+            let mut tag_bytes = [0u8; 8];
+            if stream.read_exact(&mut tag_bytes).await.is_err() {
+                tracing::warn!(rank = tx.rank, "router: failed to read tagged tag");
+                return;
+            }
+            let tag = u64::from_le_bytes(tag_bytes);
+
+            let buf = match read_raw(&mut stream, tx.rank, &tx.pool).await {
+                Some(b) => b,
+                None => return,
+            };
+
+            let mut tags = tx.tagged.lock().await;
+            // Get or create the channel for this tag.
+            let ch = tags.entry(tag).or_insert_with(|| {
+                let (tx, rx) = mpsc::channel(LANE_CAPACITY);
+                TaggedChannel { tx, rx: Some(rx) }
+            });
+            if ch.tx.send(buf).await.is_err() {
+                tracing::warn!(rank = tx.rank, tag, "router: tagged receiver dropped");
             }
         }
         STREAM_TAG_RAW_COMM => {

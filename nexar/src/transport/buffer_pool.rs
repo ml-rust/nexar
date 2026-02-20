@@ -188,6 +188,22 @@ pub struct PooledBuf {
     tier: PoolTier,
 }
 
+impl PooledBuf {
+    /// Wrap an externally-received `Vec<u8>` as a `PooledBuf`.
+    ///
+    /// The buffer will be returned to the pool's appropriate tier on drop.
+    /// Useful for wrapping data received via non-QUIC transports (e.g., RDMA).
+    pub fn from_vec(v: Vec<u8>, pool: Arc<BufferPool>) -> Self {
+        let len = v.len();
+        let (_, tier, _) = pool.tier_for_size(len);
+        Self {
+            buf: Some(v),
+            pool,
+            tier,
+        }
+    }
+}
+
 impl Deref for PooledBuf {
     type Target = [u8];
 

@@ -12,6 +12,17 @@ use futures::future::BoxFuture;
 pub trait BulkTransport: Send + Sync + 'static {
     /// Send raw bytes via the accelerated transport.
     fn send_bulk<'a>(&'a self, data: &'a [u8]) -> BoxFuture<'a, Result<()>>;
+
+    /// Receive raw bytes via the accelerated transport.
+    ///
+    /// Default: not supported (falls back to QUIC in the caller).
+    fn recv_bulk<'a>(&'a self, _expected_size: usize) -> BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            Err(NexarError::Transport(
+                "recv_bulk not supported by this transport".into(),
+            ))
+        })
+    }
 }
 
 /// Stream type tag: first byte on every QUIC uni stream.
@@ -20,6 +31,8 @@ pub(crate) const STREAM_TAG_FRAMED: u8 = 0x01;
 pub(crate) const STREAM_TAG_RAW: u8 = 0x02;
 /// Raw stream with a communicator ID prefix (for split communicators).
 pub(crate) const STREAM_TAG_RAW_COMM: u8 = 0x03;
+/// Raw stream with a u64 tag prefix (for concurrent collectives / tagged transfers).
+pub(crate) const STREAM_TAG_RAW_TAGGED: u8 = 0x04;
 
 /// A connection to a single peer node, wrapping a QUIC connection.
 ///
@@ -129,6 +142,49 @@ impl PeerConnection {
             }
         }
         self.send_raw(data).await
+    }
+
+    /// Send raw bytes with a u64 tag on a new unidirectional stream.
+    ///
+    /// Wire format: `[0x04][tag: u64 LE][len: u64 LE][payload]`.
+    /// Used by concurrent collectives to avoid cross-talk on the raw lane.
+    pub async fn send_raw_tagged(&self, tag: u64, data: &[u8]) -> Result<()> {
+        let mut stream = self
+            .conn
+            .open_uni()
+            .await
+            .map_err(|e| NexarError::Transport(format!("open uni stream: {e}")))?;
+        stream
+            .write_all(&[STREAM_TAG_RAW_TAGGED])
+            .await
+            .map_err(|e| NexarError::Transport(format!("write stream tag: {e}")))?;
+        stream
+            .write_all(&tag.to_le_bytes())
+            .await
+            .map_err(|e| NexarError::Transport(format!("write tag: {e}")))?;
+        stream
+            .write_all(&(data.len() as u64).to_le_bytes())
+            .await
+            .map_err(|e| NexarError::Transport(format!("write length: {e}")))?;
+        stream
+            .write_all(data)
+            .await
+            .map_err(|e| NexarError::Transport(format!("write payload: {e}")))?;
+        stream
+            .finish()
+            .map_err(|e| NexarError::Transport(format!("finish stream: {e}")))?;
+        Ok(())
+    }
+
+    /// Send tagged bytes using the best available transport.
+    ///
+    /// Tries any attached `BulkTransport` accelerator first, falling back to
+    /// QUIC tagged send. Note: bulk transport doesn't carry the tag, so the
+    /// receiver must already know to expect data on this tag.
+    pub async fn send_raw_tagged_best_effort(&self, tag: u64, data: &[u8]) -> Result<()> {
+        // For tagged sends, always use QUIC so the tag is preserved on the wire.
+        // BulkTransport (RDMA) doesn't carry tags — it's only safe for untagged bulk.
+        self.send_raw_tagged(tag, data).await
     }
 
     /// Get the remote address of this connection.
