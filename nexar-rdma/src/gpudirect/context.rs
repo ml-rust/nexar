@@ -22,15 +22,13 @@ impl GpuDirectContext {
             let mut num_devices: c_int = 0;
             let dev_list = ibverbs_sys::ibv_get_device_list(&mut num_devices);
             if dev_list.is_null() || num_devices == 0 {
-                return Err(NexarError::DeviceError(
-                    "GPUDirect: no RDMA devices found".into(),
-                ));
+                return Err(NexarError::device("GPUDirect: no RDMA devices found"));
             }
 
             let idx = device_index.unwrap_or(0);
             if idx >= num_devices as usize {
                 ibverbs_sys::ibv_free_device_list(dev_list);
-                return Err(NexarError::DeviceError(format!(
+                return Err(NexarError::device(format!(
                     "GPUDirect: device index {idx} out of range (have {num_devices})"
                 )));
             }
@@ -40,17 +38,13 @@ impl GpuDirectContext {
             ibverbs_sys::ibv_free_device_list(dev_list);
 
             if ctx.is_null() {
-                return Err(NexarError::DeviceError(
-                    "GPUDirect: ibv_open_device failed".into(),
-                ));
+                return Err(NexarError::device("GPUDirect: ibv_open_device failed"));
             }
 
             let pd = ibverbs_sys::ibv_alloc_pd(ctx);
             if pd.is_null() {
                 ibverbs_sys::ibv_close_device(ctx);
-                return Err(NexarError::DeviceError(
-                    "GPUDirect: ibv_alloc_pd failed".into(),
-                ));
+                return Err(NexarError::device("GPUDirect: ibv_alloc_pd failed"));
             }
 
             Ok(Self { ctx, pd })
@@ -71,7 +65,7 @@ impl GpuDirectContext {
         let mr =
             unsafe { ibverbs_sys::ibv_reg_mr(self.pd, gpu_ptr as *mut _, size, access.0 as c_int) };
         if mr.is_null() {
-            return Err(NexarError::DeviceError(format!(
+            return Err(NexarError::device(format!(
                 "GPUDirect: ibv_reg_mr failed for gpu_ptr=0x{gpu_ptr:x} size={size}. \
                  Is nvidia-peermem loaded? (modprobe nvidia-peermem)"
             )));

@@ -85,19 +85,19 @@ impl TcpBulkTransport {
         writer
             .write_all(&tag.to_le_bytes())
             .await
-            .map_err(|e| NexarError::Transport(format!("tcp bulk write tag: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("tcp bulk write tag: {e}")))?;
         writer
             .write_all(&(data.len() as u64).to_le_bytes())
             .await
-            .map_err(|e| NexarError::Transport(format!("tcp bulk write len: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("tcp bulk write len: {e}")))?;
         writer
             .write_all(data)
             .await
-            .map_err(|e| NexarError::Transport(format!("tcp bulk write payload: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("tcp bulk write payload: {e}")))?;
         writer
             .flush()
             .await
-            .map_err(|e| NexarError::Transport(format!("tcp bulk flush: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("tcp bulk flush: {e}")))?;
         Ok(())
     }
 
@@ -144,7 +144,7 @@ impl BulkTransport for TcpBulkTransport {
                 .await
                 .recv()
                 .await
-                .ok_or_else(|| NexarError::Transport("tcp bulk connection closed".into()))
+                .ok_or_else(|| NexarError::transport("tcp bulk connection closed"))
         })
     }
 }
@@ -166,7 +166,7 @@ impl TaggedBulkTransport for TcpBulkTransport {
                 .await
                 .recv()
                 .await
-                .ok_or_else(|| NexarError::Transport("tcp bulk connection closed".into()))
+                .ok_or_else(|| NexarError::transport("tcp bulk connection closed"))
         })
     }
 }
@@ -234,10 +234,10 @@ pub async fn tcp_bulk_listen(
 ) -> Result<(TcpListener, std::net::SocketAddr)> {
     let listener = TcpListener::bind(addr)
         .await
-        .map_err(|e| NexarError::Transport(format!("tcp bulk listen: {e}")))?;
+        .map_err(|e| NexarError::transport(format!("tcp bulk listen: {e}")))?;
     let local = listener
         .local_addr()
-        .map_err(|e| NexarError::Transport(format!("tcp bulk local_addr: {e}")))?;
+        .map_err(|e| NexarError::transport(format!("tcp bulk local_addr: {e}")))?;
     Ok((listener, local))
 }
 
@@ -245,10 +245,10 @@ pub async fn tcp_bulk_listen(
 pub async fn tcp_bulk_connect(addr: std::net::SocketAddr) -> Result<TcpBulkTransport> {
     let stream = TcpStream::connect(addr)
         .await
-        .map_err(|e| NexarError::Transport(format!("tcp bulk connect: {e}")))?;
+        .map_err(|e| NexarError::transport(format!("tcp bulk connect: {e}")))?;
     stream
         .set_nodelay(true)
-        .map_err(|e| NexarError::Transport(format!("tcp bulk set_nodelay: {e}")))?;
+        .map_err(|e| NexarError::transport(format!("tcp bulk set_nodelay: {e}")))?;
     Ok(TcpBulkTransport::from_stream(stream))
 }
 
@@ -257,9 +257,9 @@ pub async fn tcp_bulk_accept(listener: &TcpListener) -> Result<TcpBulkTransport>
     let (stream, _addr) = listener
         .accept()
         .await
-        .map_err(|e| NexarError::Transport(format!("tcp bulk accept: {e}")))?;
+        .map_err(|e| NexarError::transport(format!("tcp bulk accept: {e}")))?;
     stream
         .set_nodelay(true)
-        .map_err(|e| NexarError::Transport(format!("tcp bulk set_nodelay: {e}")))?;
+        .map_err(|e| NexarError::transport(format!("tcp bulk set_nodelay: {e}")))?;
     Ok(TcpBulkTransport::from_stream(stream))
 }

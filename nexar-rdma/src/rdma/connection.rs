@@ -48,20 +48,20 @@ impl RdmaContext {
     /// `device_index` selects which RDMA device to use (default: first).
     /// Creates a protection domain and two CQs (256 entries each).
     pub fn new(device_index: Option<usize>) -> Result<Self> {
-        let dev_list = ibverbs::devices().map_err(|e| NexarError::DeviceError(e.to_string()))?;
+        let dev_list = ibverbs::devices().map_err(|e| NexarError::device(e.to_string()))?;
         if dev_list.is_empty() {
-            return Err(NexarError::DeviceError("no RDMA devices found".into()));
+            return Err(NexarError::device("no RDMA devices found"));
         }
         let idx = device_index.unwrap_or(0);
         let dev = dev_list.get(idx).ok_or_else(|| {
-            NexarError::DeviceError(format!(
+            NexarError::device(format!(
                 "RDMA device index {idx} out of range (have {})",
                 dev_list.len()
             ))
         })?;
         let ctx = Box::new(
             dev.open()
-                .map_err(|e| NexarError::DeviceError(format!("open RDMA device: {e}")))?,
+                .map_err(|e| NexarError::device(format!("open RDMA device: {e}")))?,
         );
 
         // Safety: We extend lifetimes to 'static because we own the Context
@@ -72,13 +72,13 @@ impl RdmaContext {
 
         let send_cq = ctx_ref
             .create_cq(256, 0)
-            .map_err(|e| NexarError::DeviceError(format!("create send CQ: {e}")))?;
+            .map_err(|e| NexarError::device(format!("create send CQ: {e}")))?;
         let recv_cq = ctx_ref
             .create_cq(256, 1)
-            .map_err(|e| NexarError::DeviceError(format!("create recv CQ: {e}")))?;
+            .map_err(|e| NexarError::device(format!("create recv CQ: {e}")))?;
         let pd = ctx_ref
             .alloc_pd()
-            .map_err(|e| NexarError::DeviceError(format!("alloc PD: {e}")))?;
+            .map_err(|e| NexarError::device(format!("alloc PD: {e}")))?;
 
         Ok(Self {
             send_cq: std::sync::Mutex::new(send_cq),
@@ -92,7 +92,7 @@ impl RdmaContext {
     pub fn allocate(&self, size: usize) -> Result<ibverbs::MemoryRegion<u8>> {
         self.pd
             .allocate::<u8>(size)
-            .map_err(|e| NexarError::DeviceError(format!("allocate MR: {e}")))
+            .map_err(|e| NexarError::device(format!("allocate MR: {e}")))
     }
 
     /// Prepare a new RDMA connection (QP in INIT state) for the given peer.
@@ -100,11 +100,11 @@ impl RdmaContext {
         let send_cq = self
             .send_cq
             .lock()
-            .map_err(|e| NexarError::DeviceError(format!("send CQ lock poisoned: {e}")))?;
+            .map_err(|e| NexarError::device(format!("send CQ lock poisoned: {e}")))?;
         let recv_cq = self
             .recv_cq
             .lock()
-            .map_err(|e| NexarError::DeviceError(format!("recv CQ lock poisoned: {e}")))?;
+            .map_err(|e| NexarError::device(format!("recv CQ lock poisoned: {e}")))?;
 
         let mut builder = self
             .pd
@@ -115,7 +115,7 @@ impl RdmaContext {
             .set_max_recv_wr(128);
         let pqp = builder
             .build()
-            .map_err(|e| NexarError::DeviceError(format!("build QP: {e}")))?;
+            .map_err(|e| NexarError::device(format!("build QP: {e}")))?;
 
         // Safety: The CQ guards are released here, but the underlying CQs
         // live inside the Arc<RdmaContext> which the PreparedRdmaConnection
@@ -195,7 +195,7 @@ impl RdmaConnection {
         unsafe {
             self.qp
                 .post_send(mr, 0..len, wr_id)
-                .map_err(|e| NexarError::DeviceError(format!("post_send: {e}")))?;
+                .map_err(|e| NexarError::device(format!("post_send: {e}")))?;
         }
         self.wait_send_completion()
     }
@@ -206,7 +206,7 @@ impl RdmaConnection {
         unsafe {
             self.qp
                 .post_receive(mr, 0..len, wr_id)
-                .map_err(|e| NexarError::DeviceError(format!("post_receive: {e}")))?;
+                .map_err(|e| NexarError::device(format!("post_receive: {e}")))?;
         }
         self.wait_recv_completion()
     }
@@ -217,11 +217,11 @@ impl RdmaConnection {
             .ctx
             .send_cq
             .lock()
-            .map_err(|e| NexarError::DeviceError(format!("send CQ lock poisoned: {e}")))?;
+            .map_err(|e| NexarError::device(format!("send CQ lock poisoned: {e}")))?;
         let mut completions = [ibverbs::ibv_wc::default(); 16];
         let done = cq
             .poll(&mut completions)
-            .map_err(|e| NexarError::DeviceError(format!("poll send CQ: {e}")))?;
+            .map_err(|e| NexarError::device(format!("poll send CQ: {e}")))?;
         check_completions(done)?;
         Ok(done.iter().map(|wc| wc.wr_id()).collect())
     }
@@ -232,11 +232,11 @@ impl RdmaConnection {
             .ctx
             .recv_cq
             .lock()
-            .map_err(|e| NexarError::DeviceError(format!("recv CQ lock poisoned: {e}")))?;
+            .map_err(|e| NexarError::device(format!("recv CQ lock poisoned: {e}")))?;
         let mut completions = [ibverbs::ibv_wc::default(); 16];
         let done = cq
             .poll(&mut completions)
-            .map_err(|e| NexarError::DeviceError(format!("poll recv CQ: {e}")))?;
+            .map_err(|e| NexarError::device(format!("poll recv CQ: {e}")))?;
         check_completions(done)?;
         Ok(done.iter().map(|wc| wc.wr_id()).collect())
     }
@@ -265,17 +265,17 @@ fn poll_until_complete(
         {
             let cq = cq_mutex
                 .lock()
-                .map_err(|e| NexarError::DeviceError(format!("CQ lock poisoned: {e}")))?;
+                .map_err(|e| NexarError::device(format!("CQ lock poisoned: {e}")))?;
             let done = cq
                 .poll(&mut completions)
-                .map_err(|e| NexarError::DeviceError(format!("poll CQ: {e}")))?;
+                .map_err(|e| NexarError::device(format!("poll CQ: {e}")))?;
             if !done.is_empty() {
                 check_completions(done)?;
                 return Ok(());
             }
         }
         if start.elapsed() > timeout {
-            return Err(NexarError::DeviceError(format!(
+            return Err(NexarError::device(format!(
                 "CQ poll timed out after {}ms",
                 timeout.as_millis()
             )));
@@ -295,7 +295,7 @@ fn poll_until_complete(
 fn check_completions(completions: &[ibverbs::ibv_wc]) -> Result<()> {
     for wc in completions {
         if let Some((status, vendor_err)) = wc.error() {
-            return Err(NexarError::DeviceError(format!(
+            return Err(NexarError::device(format!(
                 "work completion failed: status={status:?}, vendor_err={vendor_err}, wr_id={}",
                 wc.wr_id()
             )));

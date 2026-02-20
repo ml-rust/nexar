@@ -57,17 +57,13 @@ impl PreparedGpuDirectQp {
             let send_cq =
                 ibverbs_sys::ibv_create_cq(ctx.ctx, 256, ptr::null_mut(), ptr::null_mut(), 0);
             if send_cq.is_null() {
-                return Err(NexarError::DeviceError(
-                    "GPUDirect: ibv_create_cq (send) failed".into(),
-                ));
+                return Err(NexarError::device("GPUDirect: ibv_create_cq (send) failed"));
             }
             let recv_cq =
                 ibverbs_sys::ibv_create_cq(ctx.ctx, 256, ptr::null_mut(), ptr::null_mut(), 0);
             if recv_cq.is_null() {
                 ibverbs_sys::ibv_destroy_cq(send_cq);
-                return Err(NexarError::DeviceError(
-                    "GPUDirect: ibv_create_cq (recv) failed".into(),
-                ));
+                return Err(NexarError::device("GPUDirect: ibv_create_cq (recv) failed"));
             }
 
             let mut qp_init_attr: ibverbs_sys::ibv_qp_init_attr = std::mem::zeroed();
@@ -83,9 +79,7 @@ impl PreparedGpuDirectQp {
             if qp.is_null() {
                 ibverbs_sys::ibv_destroy_cq(recv_cq);
                 ibverbs_sys::ibv_destroy_cq(send_cq);
-                return Err(NexarError::DeviceError(
-                    "GPUDirect: ibv_create_qp failed".into(),
-                ));
+                return Err(NexarError::device("GPUDirect: ibv_create_qp failed"));
             }
 
             // Transition to INIT.
@@ -108,7 +102,7 @@ impl PreparedGpuDirectQp {
                 ibverbs_sys::ibv_destroy_qp(qp);
                 ibverbs_sys::ibv_destroy_cq(recv_cq);
                 ibverbs_sys::ibv_destroy_cq(send_cq);
-                return Err(NexarError::DeviceError(format!(
+                return Err(NexarError::device(format!(
                     "GPUDirect: ibv_modify_qp to INIT failed (rc={rc})"
                 )));
             }
@@ -120,7 +114,7 @@ impl PreparedGpuDirectQp {
                 ibverbs_sys::ibv_destroy_qp(qp);
                 ibverbs_sys::ibv_destroy_cq(recv_cq);
                 ibverbs_sys::ibv_destroy_cq(send_cq);
-                return Err(NexarError::DeviceError(format!(
+                return Err(NexarError::device(format!(
                     "GPUDirect: ibv_query_gid failed (rc={rc})"
                 )));
             }
@@ -178,7 +172,7 @@ impl PreparedGpuDirectQp {
                 let qp = self.qp;
                 self.qp = ptr::null_mut();
                 ibverbs_sys::ibv_destroy_qp(qp);
-                return Err(NexarError::DeviceError(format!(
+                return Err(NexarError::device(format!(
                     "GPUDirect: ibv_modify_qp to RTR failed (rc={rc})"
                 )));
             }
@@ -204,7 +198,7 @@ impl PreparedGpuDirectQp {
                 let qp = self.qp;
                 self.qp = ptr::null_mut();
                 ibverbs_sys::ibv_destroy_qp(qp);
-                return Err(NexarError::DeviceError(format!(
+                return Err(NexarError::device(format!(
                     "GPUDirect: ibv_modify_qp to RTS failed (rc={rc})"
                 )));
             }
@@ -280,7 +274,7 @@ impl GpuDirectQp {
                 &mut bad_wr as *mut _,
             );
             if rc != 0 {
-                return Err(NexarError::DeviceError(format!(
+                return Err(NexarError::device(format!(
                     "GPUDirect: post_send failed (rc={rc})"
                 )));
             }
@@ -310,7 +304,7 @@ impl GpuDirectQp {
                 &mut bad_wr as *mut _,
             );
             if rc != 0 {
-                return Err(NexarError::DeviceError(format!(
+                return Err(NexarError::device(format!(
                     "GPUDirect: post_recv failed (rc={rc})"
                 )));
             }
@@ -329,11 +323,11 @@ impl GpuDirectQp {
             loop {
                 let n = ops.poll_cq.as_mut().expect("poll_cq missing")(cq, 1, &mut wc as *mut _);
                 if n < 0 {
-                    return Err(NexarError::DeviceError("GPUDirect: poll_cq failed".into()));
+                    return Err(NexarError::device("GPUDirect: poll_cq failed"));
                 }
                 if n > 0 {
                     if let Some((status, vendor_err)) = wc.error() {
-                        return Err(NexarError::DeviceError(format!(
+                        return Err(NexarError::device(format!(
                             "GPUDirect: work completion failed \
                              (status={status:?}, vendor_err={vendor_err}, wr_id={})",
                             wc.wr_id()
@@ -342,7 +336,7 @@ impl GpuDirectQp {
                     return Ok(());
                 }
                 if start.elapsed() > Self::CQ_POLL_TIMEOUT {
-                    return Err(NexarError::DeviceError(format!(
+                    return Err(NexarError::device(format!(
                         "GPUDirect: CQ poll timed out after {}ms",
                         Self::CQ_POLL_TIMEOUT.as_millis()
                     )));
@@ -373,9 +367,8 @@ impl Drop for GpuDirectQp {
 pub fn stage_gpu_to_host(gpu_ptr: u64, size: usize) -> Result<Vec<u8>> {
     let mut host_buf = vec![0u8; size];
     unsafe {
-        cudarc::driver::result::memcpy_dtoh_sync(&mut host_buf, gpu_ptr).map_err(|e| {
-            NexarError::DeviceError(format!("GPUDirect fallback D2H copy failed: {e}"))
-        })?;
+        cudarc::driver::result::memcpy_dtoh_sync(&mut host_buf, gpu_ptr)
+            .map_err(|e| NexarError::device(format!("GPUDirect fallback D2H copy failed: {e}")))?;
     }
     Ok(host_buf)
 }
@@ -383,9 +376,8 @@ pub fn stage_gpu_to_host(gpu_ptr: u64, size: usize) -> Result<Vec<u8>> {
 /// Copy host data into GPU memory via CUDA H2D copy.
 pub fn stage_host_to_gpu(data: &[u8], gpu_ptr: u64) -> Result<()> {
     unsafe {
-        cudarc::driver::result::memcpy_htod_sync(gpu_ptr, data).map_err(|e| {
-            NexarError::DeviceError(format!("GPUDirect fallback H2D copy failed: {e}"))
-        })?;
+        cudarc::driver::result::memcpy_htod_sync(gpu_ptr, data)
+            .map_err(|e| NexarError::device(format!("GPUDirect fallback H2D copy failed: {e}")))?;
     }
     Ok(())
 }

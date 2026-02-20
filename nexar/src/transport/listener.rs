@@ -19,11 +19,11 @@ impl TransportListener {
         let server_config = make_server_config(cert, key)?;
 
         let endpoint = quinn::Endpoint::server(server_config, addr)
-            .map_err(|e| NexarError::Transport(format!("bind {addr}: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("bind {addr}: {e}")))?;
 
         let local_addr = endpoint
             .local_addr()
-            .map_err(|e| NexarError::Transport(format!("local_addr: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("local_addr: {e}")))?;
 
         Ok(Self {
             endpoint,
@@ -44,11 +44,11 @@ impl TransportListener {
         let server_config = make_server_config_mtls(cert, key, ca_cert)?;
 
         let endpoint = quinn::Endpoint::server(server_config, addr)
-            .map_err(|e| NexarError::Transport(format!("bind {addr}: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("bind {addr}: {e}")))?;
 
         let local_addr = endpoint
             .local_addr()
-            .map_err(|e| NexarError::Transport(format!("local_addr: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("local_addr: {e}")))?;
 
         Ok(Self {
             endpoint,
@@ -59,11 +59,11 @@ impl TransportListener {
     /// Bind with an existing server config (for sharing certs across tests).
     pub fn bind_with_config(addr: SocketAddr, config: quinn::ServerConfig) -> Result<Self> {
         let endpoint = quinn::Endpoint::server(config, addr)
-            .map_err(|e| NexarError::Transport(format!("bind {addr}: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("bind {addr}: {e}")))?;
 
         let local_addr = endpoint
             .local_addr()
-            .map_err(|e| NexarError::Transport(format!("local_addr: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("local_addr: {e}")))?;
 
         Ok(Self {
             endpoint,
@@ -77,11 +77,11 @@ impl TransportListener {
             .endpoint
             .accept()
             .await
-            .ok_or_else(|| NexarError::Transport("endpoint closed".into()))?;
+            .ok_or_else(|| NexarError::transport("endpoint closed"))?;
 
         incoming
             .await
-            .map_err(|e| NexarError::Transport(format!("accept: {e}")))
+            .map_err(|e| NexarError::transport(format!("accept: {e}")))
     }
 
     /// The local address this listener is bound to.

@@ -16,7 +16,7 @@ impl SyncClient {
     /// Bootstrap a local cluster and return sync clients for each rank.
     pub fn bootstrap_local(world_size: u32, adapter: Arc<dyn DeviceAdapter>) -> Result<Vec<Self>> {
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| crate::error::NexarError::Transport(format!("tokio runtime: {e}")))?;
+            .map_err(|e| crate::error::NexarError::transport(format!("tokio runtime: {e}")))?;
 
         let clients = rt.block_on(super::NexarClient::bootstrap_local(world_size, adapter))?;
 
@@ -31,7 +31,7 @@ impl SyncClient {
 
         for client in iter {
             let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| crate::error::NexarError::Transport(format!("tokio runtime: {e}")))?;
+                .map_err(|e| crate::error::NexarError::transport(format!("tokio runtime: {e}")))?;
             sync_clients.push(SyncClient { inner: client, rt });
         }
 
@@ -41,7 +41,7 @@ impl SyncClient {
     /// Wrap an existing async client with a new tokio runtime.
     pub fn from_async(inner: super::NexarClient) -> Result<Self> {
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| crate::error::NexarError::Transport(format!("tokio runtime: {e}")))?;
+            .map_err(|e| crate::error::NexarError::transport(format!("tokio runtime: {e}")))?;
         Ok(Self { inner, rt })
     }
 
@@ -68,6 +68,36 @@ impl SyncClient {
     ) -> Result<()> {
         self.rt
             .block_on(unsafe { self.inner.all_reduce(ptr, count, dtype, op) })
+    }
+
+    /// Bucketed allreduce: fuse multiple small tensors into one allreduce.
+    ///
+    /// # Safety
+    /// Each `(ptr, count)` entry must point to at least `count * dtype.size_in_bytes()`
+    /// valid bytes on the device.
+    pub unsafe fn all_reduce_bucketed(
+        &self,
+        entries: &[(u64, usize)],
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt
+            .block_on(unsafe { self.inner.all_reduce_bucketed(entries, dtype, op) })
+    }
+
+    /// Allreduce via reduce-scatter + allgather decomposition.
+    ///
+    /// # Safety
+    /// `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+    pub unsafe fn all_reduce_rs_ag(
+        &self,
+        ptr: u64,
+        count: usize,
+        dtype: DataType,
+        op: ReduceOp,
+    ) -> Result<()> {
+        self.rt
+            .block_on(unsafe { self.inner.all_reduce_rs_ag(ptr, count, dtype, op) })
     }
 
     /// Broadcast from root.

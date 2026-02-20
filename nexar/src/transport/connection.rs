@@ -18,8 +18,8 @@ pub trait BulkTransport: Send + Sync + 'static {
     /// Default: not supported (falls back to QUIC in the caller).
     fn recv_bulk<'a>(&'a self, _expected_size: usize) -> BoxFuture<'a, Result<Vec<u8>>> {
         Box::pin(async move {
-            Err(NexarError::Transport(
-                "recv_bulk not supported by this transport".into(),
+            Err(NexarError::transport(
+                "recv_bulk not supported by this transport",
             ))
         })
     }
@@ -50,17 +50,25 @@ pub(crate) const STREAM_TAG_RAW_TAGGED: u8 = 0x04;
 pub struct PeerConnection {
     pub rank: Rank,
     pub(crate) conn: quinn::Connection,
+    /// Pre-opened stream pool for reducing `open_uni()` latency.
+    stream_pool: super::stream_pool::StreamPool,
     /// Opaque extension slot for transport accelerators (RDMA, GPUDirect).
     /// External crates attach typed state via `add_extension` / `extension`.
     extensions: std::sync::RwLock<Vec<Box<dyn std::any::Any + Send + Sync>>>,
 }
 
+/// Maximum number of pre-opened streams per peer.
+const STREAM_POOL_MAX_READY: usize = 8;
+
 impl PeerConnection {
     /// Create a `PeerConnection` from an established QUIC connection.
     pub fn new(rank: Rank, conn: quinn::Connection) -> Self {
+        let stream_pool =
+            super::stream_pool::StreamPool::new(conn.clone(), STREAM_POOL_MAX_READY);
         Self {
             rank,
             conn,
+            stream_pool,
             extensions: std::sync::RwLock::new(Vec::new()),
         }
     }
@@ -100,30 +108,26 @@ impl PeerConnection {
     /// Send raw bytes tagged with a communicator ID (for split communicators).
     /// Always uses QUIC (split comms are a logical overlay).
     pub async fn send_raw_comm(&self, comm_id: u32, data: &[u8]) -> Result<()> {
-        let mut stream = self
-            .conn
-            .open_uni()
-            .await
-            .map_err(|e| NexarError::Transport(format!("open uni stream: {e}")))?;
+        let mut stream = self.stream_pool.checkout().await?;
         stream
             .write_all(&[STREAM_TAG_RAW_COMM])
             .await
-            .map_err(|e| NexarError::Transport(format!("write stream tag: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write stream tag: {e}")))?;
         stream
             .write_all(&comm_id.to_le_bytes())
             .await
-            .map_err(|e| NexarError::Transport(format!("write comm_id: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write comm_id: {e}")))?;
         stream
             .write_all(&(data.len() as u64).to_le_bytes())
             .await
-            .map_err(|e| NexarError::Transport(format!("write length: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write length: {e}")))?;
         stream
             .write_all(data)
             .await
-            .map_err(|e| NexarError::Transport(format!("write payload: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write payload: {e}")))?;
         stream
             .finish()
-            .map_err(|e| NexarError::Transport(format!("finish stream: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("finish stream: {e}")))?;
         Ok(())
     }
 
@@ -149,30 +153,26 @@ impl PeerConnection {
     /// Wire format: `[0x04][tag: u64 LE][len: u64 LE][payload]`.
     /// Used by concurrent collectives to avoid cross-talk on the raw lane.
     pub async fn send_raw_tagged(&self, tag: u64, data: &[u8]) -> Result<()> {
-        let mut stream = self
-            .conn
-            .open_uni()
-            .await
-            .map_err(|e| NexarError::Transport(format!("open uni stream: {e}")))?;
+        let mut stream = self.stream_pool.checkout().await?;
         stream
             .write_all(&[STREAM_TAG_RAW_TAGGED])
             .await
-            .map_err(|e| NexarError::Transport(format!("write stream tag: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write stream tag: {e}")))?;
         stream
             .write_all(&tag.to_le_bytes())
             .await
-            .map_err(|e| NexarError::Transport(format!("write tag: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write tag: {e}")))?;
         stream
             .write_all(&(data.len() as u64).to_le_bytes())
             .await
-            .map_err(|e| NexarError::Transport(format!("write length: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write length: {e}")))?;
         stream
             .write_all(data)
             .await
-            .map_err(|e| NexarError::Transport(format!("write payload: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write payload: {e}")))?;
         stream
             .finish()
-            .map_err(|e| NexarError::Transport(format!("finish stream: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("finish stream: {e}")))?;
         Ok(())
     }
 
@@ -200,27 +200,26 @@ impl PeerConnection {
 
     /// Open a uni stream, write the stream type tag + length-prefixed payload,
     /// then finish. Shared by both framed and raw sends.
+    ///
+    /// Uses the stream pool to avoid `open_uni()` latency when pre-opened
+    /// streams are available.
     async fn send_tagged(&self, tag: u8, data: &[u8]) -> Result<()> {
-        let mut stream = self
-            .conn
-            .open_uni()
-            .await
-            .map_err(|e| NexarError::Transport(format!("open uni stream: {e}")))?;
+        let mut stream = self.stream_pool.checkout().await?;
         stream
             .write_all(&[tag])
             .await
-            .map_err(|e| NexarError::Transport(format!("write stream tag: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write stream tag: {e}")))?;
         stream
             .write_all(&(data.len() as u64).to_le_bytes())
             .await
-            .map_err(|e| NexarError::Transport(format!("write length: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write length: {e}")))?;
         stream
             .write_all(data)
             .await
-            .map_err(|e| NexarError::Transport(format!("write payload: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("write payload: {e}")))?;
         stream
             .finish()
-            .map_err(|e| NexarError::Transport(format!("finish stream: {e}")))?;
+            .map_err(|e| NexarError::transport(format!("finish stream: {e}")))?;
         Ok(())
     }
 }

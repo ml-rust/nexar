@@ -21,7 +21,7 @@ impl CollectiveHandle {
     /// Wait for the collective to complete and propagate any error.
     pub async fn wait(self) -> Result<()> {
         self.inner.await.map_err(|e| {
-            crate::error::NexarError::Transport(format!("collective task panicked: {e}"))
+            crate::error::NexarError::transport(format!("collective task panicked: {e}"))
         })?
     }
 
