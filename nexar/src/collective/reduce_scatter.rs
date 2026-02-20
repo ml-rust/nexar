@@ -63,12 +63,10 @@ pub(crate) async unsafe fn ring_reduce_scatter_with_tag(
 
         let send_data = buf[send_off..send_off + chunk_bytes].to_vec();
 
-        let (send_result, recv_result) = tokio::join!(
+        let (_, received) = tokio::try_join!(
             collective_send_with_tag(client, next as u32, &send_data, "reduce_scatter", tag),
             collective_recv_with_tag(client, prev as u32, "reduce_scatter", tag),
-        );
-        send_result?;
-        let received = recv_result?;
+        )?;
 
         if received.len() != chunk_bytes {
             return Err(NexarError::BufferSizeMismatch {

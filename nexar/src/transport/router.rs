@@ -37,7 +37,7 @@ pub struct PeerRouter {
     pub data: Mutex<mpsc::Receiver<NexarMessage>>,
     pub raw: Mutex<mpsc::Receiver<PooledBuf>>,
     /// Per-comm_id raw channels for split communicators.
-    raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>>,
+    raw_comms: Arc<Mutex<HashMap<u64, CommChannel>>>,
     /// Per-tag raw channels for concurrent collectives.
     /// Channels are lazily created when tagged data arrives or when
     /// `register_tag` is called, whichever comes first.
@@ -68,7 +68,7 @@ struct RouterSenders {
     control: mpsc::Sender<NexarMessage>,
     data: mpsc::Sender<NexarMessage>,
     raw: mpsc::Sender<PooledBuf>,
-    raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>>,
+    raw_comms: Arc<Mutex<HashMap<u64, CommChannel>>>,
     tagged: Arc<Mutex<HashMap<u64, TaggedChannel>>>,
     pool: Arc<BufferPool>,
 }
@@ -88,7 +88,7 @@ impl PeerRouter {
         let rpc_waiters: Arc<Mutex<HashMap<u64, oneshot::Sender<NexarMessage>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        let raw_comms: Arc<Mutex<HashMap<u32, CommChannel>>> = Arc::new(Mutex::new(HashMap::new()));
+        let raw_comms: Arc<Mutex<HashMap<u64, CommChannel>>> = Arc::new(Mutex::new(HashMap::new()));
         let tagged: Arc<Mutex<HashMap<u64, TaggedChannel>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let senders = RouterSenders {
@@ -132,7 +132,7 @@ impl PeerRouter {
 
     /// Register a communicator channel and return the receiver.
     /// Called during `split()` to set up per-comm_id routing.
-    pub async fn register_comm(&self, comm_id: u32) -> mpsc::Receiver<PooledBuf> {
+    pub async fn register_comm(&self, comm_id: u64) -> mpsc::Receiver<PooledBuf> {
         let (tx, rx) = mpsc::channel(LANE_CAPACITY);
         let mut comms = self.raw_comms.lock().await;
         comms.insert(comm_id, CommChannel { tx });
@@ -284,13 +284,13 @@ async fn handle_stream(mut stream: quinn::RecvStream, tx: &RouterSenders) {
             }
         }
         STREAM_TAG_RAW_COMM => {
-            // Read 4-byte comm_id, then length-prefixed payload.
-            let mut comm_id_buf = [0u8; 4];
+            // Read 8-byte comm_id, then length-prefixed payload.
+            let mut comm_id_buf = [0u8; 8];
             if stream.read_exact(&mut comm_id_buf).await.is_err() {
                 tracing::warn!(rank = tx.rank, "router: failed to read comm_id");
                 return;
             }
-            let comm_id = u32::from_le_bytes(comm_id_buf);
+            let comm_id = u64::from_le_bytes(comm_id_buf);
 
             let buf = match read_raw(&mut stream, tx.rank, &tx.pool).await {
                 Some(b) => b,

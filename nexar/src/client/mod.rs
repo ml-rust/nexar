@@ -1,5 +1,6 @@
 mod async_client;
 mod bootstrap;
+mod byte_transport;
 mod collectives;
 mod collectives_nb;
 mod split;

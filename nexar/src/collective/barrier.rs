@@ -208,9 +208,7 @@ async fn dissemination_barrier(client: &NexarClient, timeout: Duration) -> Resul
             }
         };
 
-        let (send_result, recv_result) = tokio::join!(send_fut, recv_fut);
-        send_result?;
-        recv_result?;
+        tokio::try_join!(send_fut, recv_fut)?;
     }
 
     Ok(())

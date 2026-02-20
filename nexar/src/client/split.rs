@@ -26,15 +26,17 @@ impl NexarClient {
         let world = self.world_size as usize;
         let rank = self.rank;
 
-        // Step 1: Exchange (color, key) tuples with all peers.
-        // Encode as 8 bytes: [color: u32 LE][key: u32 LE].
-        let mut my_info = [0u8; 8];
+        // Step 1: Exchange (color, key, split_generation) tuples with all peers.
+        // Encode as 16 bytes: [color: u32 LE][key: u32 LE][generation: u64 LE].
+        let current_gen = self.split_generation.load(Ordering::Relaxed);
+        let mut my_info = [0u8; 16];
         my_info[..4].copy_from_slice(&color.to_le_bytes());
-        my_info[4..].copy_from_slice(&key.to_le_bytes());
+        my_info[4..8].copy_from_slice(&key.to_le_bytes());
+        my_info[8..16].copy_from_slice(&current_gen.to_le_bytes());
 
         // AllGather the info from all ranks.
-        let mut all_info = vec![0u8; 8 * world];
-        all_info[rank as usize * 8..(rank as usize + 1) * 8].copy_from_slice(&my_info);
+        let mut all_info = vec![0u8; 16 * world];
+        all_info[rank as usize * 16..(rank as usize + 1) * 16].copy_from_slice(&my_info);
 
         // Use the existing allgather collective. We pass raw pointers to our
         // stack-allocated buffers.
@@ -45,16 +47,16 @@ impl NexarClient {
                 self,
                 send_ptr,
                 recv_ptr,
-                8, // 8 bytes per rank
+                16, // 16 bytes per rank
                 crate::types::DataType::U8,
             )
             .await?;
         }
 
-        // Step 2: Parse all (color, key) tuples.
+        // Step 2: Parse all (color, key) tuples and validate generation consistency.
         let mut entries: Vec<(Rank, u32, u32)> = Vec::with_capacity(world);
         for r in 0..world {
-            let off = r * 8;
+            let off = r * 16;
             let c = u32::from_le_bytes(
                 all_info[off..off + 4]
                     .try_into()
@@ -65,6 +67,20 @@ impl NexarClient {
                     .try_into()
                     .map_err(|_| NexarError::DecodeFailed("split key bytes".into()))?,
             );
+            let peer_gen = u64::from_le_bytes(
+                all_info[off + 8..off + 16]
+                    .try_into()
+                    .map_err(|_| NexarError::DecodeFailed("split generation bytes".into()))?,
+            );
+            if peer_gen != current_gen {
+                return Err(NexarError::CollectiveFailed {
+                    operation: "split",
+                    rank: r as Rank,
+                    reason: format!(
+                        "split_generation mismatch: local={current_gen}, rank {r}={peer_gen}"
+                    ),
+                });
+            }
             entries.push((r as Rank, c, k));
         }
 
@@ -94,7 +110,7 @@ impl NexarClient {
         // to produce a unique comm_id per split group.
         let split_gen = self.split_generation.fetch_add(1, Ordering::Relaxed);
         let new_comm_id = {
-            // Hash (parent_comm_id, generation, color) to produce a non-zero u32.
+            // Hash (parent_comm_id, generation, color) via FNV-1a to produce a non-zero u64.
             let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
             for b in self.comm_id.to_le_bytes() {
                 h ^= b as u64;
@@ -108,9 +124,8 @@ impl NexarClient {
                 h ^= b as u64;
                 h = h.wrapping_mul(0x100000001b3);
             }
-            // Fold to u32, ensure non-zero (0 is reserved for root comm).
-            let id = ((h >> 32) ^ h) as u32;
-            if id == 0 { 1 } else { id }
+            // Ensure non-zero (0 is reserved for root comm).
+            if h == 0 { 1 } else { h }
         };
 
         // Step 5: Build rank_map (new_rank -> original_rank) and peer subset.
@@ -165,6 +180,7 @@ impl NexarClient {
             rank_map,
             collective_tag: AtomicU64::new(1),
             tagged_receivers: tokio::sync::Mutex::new(HashMap::new()),
+            config: Arc::clone(&self.config),
         })
     }
 }

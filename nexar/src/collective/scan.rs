@@ -57,12 +57,10 @@ pub(crate) async unsafe fn inclusive_scan_with_tag(
             (true, true) => {
                 let dest = rank + distance;
                 let send_data = buf.clone();
-                let (send_result, recv_result) = tokio::join!(
+                let (_, received) = tokio::try_join!(
                     collective_send_with_tag(client, dest as u32, &send_data, "scan", tag),
                     collective_recv_with_tag(client, source as u32, "scan", tag),
-                );
-                send_result?;
-                let received = recv_result?;
+                )?;
                 if received.len() != total_bytes {
                     return Err(NexarError::BufferSizeMismatch {
                         expected: total_bytes,
@@ -142,12 +140,10 @@ pub(crate) async unsafe fn exclusive_scan_with_tag(
 
     match (should_send, should_recv) {
         (true, true) => {
-            let (send_res, recv_res) = tokio::join!(
+            let (_, received) = tokio::try_join!(
                 collective_send_with_tag(client, (rank + 1) as u32, &inclusive_data, "exscan", tag),
                 collective_recv_with_tag(client, (rank - 1) as u32, "exscan", tag),
-            );
-            send_res?;
-            let received = recv_res?;
+            )?;
             if received.len() != total_bytes {
                 return Err(NexarError::BufferSizeMismatch {
                     expected: total_bytes,

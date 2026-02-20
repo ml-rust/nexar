@@ -51,12 +51,10 @@ pub(crate) async unsafe fn alltoall_with_tag(
         let send_off = send_to * chunk_bytes;
         let send_data = &send_buf[send_off..send_off + chunk_bytes];
 
-        let (send_result, recv_result) = tokio::join!(
+        let (_, received) = tokio::try_join!(
             collective_send_with_tag(client, send_to as u32, send_data, "alltoall", tag),
             collective_recv_with_tag(client, recv_from as u32, "alltoall", tag),
-        );
-        send_result?;
-        let received = recv_result?;
+        )?;
 
         if received.len() != chunk_bytes {
             return Err(NexarError::BufferSizeMismatch {

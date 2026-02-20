@@ -55,12 +55,10 @@ pub async unsafe fn ring_allreduce_compressed(
     // Forward compressed data around the ring: N-1 steps.
     let mut to_forward = my_compressed;
     for _step in 0..(world - 1) {
-        let (send_result, recv_result) = tokio::join!(
+        let (_, received) = tokio::try_join!(
             collective_send(client, next, &to_forward, "allreduce_compressed"),
             collective_recv(client, prev, "allreduce_compressed"),
-        );
-        send_result?;
-        let received = recv_result?;
+        )?;
         to_forward = received.to_vec();
         all_compressed.push(to_forward.clone());
     }

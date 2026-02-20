@@ -129,7 +129,7 @@ impl PeerConnection {
 
     /// Send raw bytes tagged with a communicator ID (for split communicators).
     /// Always uses QUIC (split comms are a logical overlay).
-    pub async fn send_raw_comm(&self, comm_id: u32, data: &[u8]) -> Result<()> {
+    pub async fn send_raw_comm(&self, comm_id: u64, data: &[u8]) -> Result<()> {
         self.send_framed(STREAM_TAG_RAW_COMM, &comm_id.to_le_bytes(), data)
             .await
     }

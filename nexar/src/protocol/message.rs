@@ -31,10 +31,10 @@ pub enum NexarMessage {
     },
 
     /// Barrier request: all ranks must reach this epoch before proceeding.
-    Barrier { epoch: u64, comm_id: u32 },
+    Barrier { epoch: u64, comm_id: u64 },
 
     /// Barrier acknowledgement from coordinator.
-    BarrierAck { epoch: u64, comm_id: u32 },
+    BarrierAck { epoch: u64, comm_id: u64 },
 
     /// Periodic heartbeat for failure detection.
     Heartbeat { timestamp_ns: u64 },
