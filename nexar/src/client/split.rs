@@ -186,6 +186,10 @@ impl NexarClient {
             failure_tx: Arc::clone(&self.failure_tx),
             failure_rx: self.failure_rx.clone(),
             _monitor_handle: None, // Split clients share the parent's monitor
+            routing_table: self.routing_table.clone(),
+            relay_deliveries: self.relay_deliveries.clone(),
+            _relay_handles: Vec::new(), // Split clients share the parent's relay
+            _endpoints: Vec::new(),
         })
     }
 }

@@ -100,6 +100,17 @@ pub enum NexarMessage {
         leaving: Vec<Rank>,
         new_world_size: u32,
     },
+
+    /// Relay message for sparse topologies: forwarded through intermediate hops.
+    ///
+    /// `tag == 0` means the payload is a serialized `NexarMessage` (control).
+    /// `tag > 0` means the payload is raw collective data for that tag.
+    Relay {
+        src_rank: Rank,
+        final_dest: Rank,
+        tag: u64,
+        payload: Vec<u8>,
+    },
 }
 
 #[cfg(test)]
@@ -204,6 +215,12 @@ mod tests {
                 joining: vec![(4, "127.0.0.1:9000".into())],
                 leaving: vec![2],
                 new_world_size: 4,
+            },
+            NexarMessage::Relay {
+                src_rank: 0,
+                final_dest: 5,
+                tag: 42,
+                payload: vec![1, 2, 3, 4],
             },
         ];
 

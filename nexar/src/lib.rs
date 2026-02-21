@@ -17,7 +17,8 @@ pub mod types;
 pub use client::{NexarClient, SyncClient};
 pub use cluster::{
     ElasticBootstrap, ElasticConfig, ElasticEvent, ElasticManager, FormClusterResult,
-    RecoveryEvent, RecoveryOrchestrator, RecoveryPolicy, SeedNode, WorkerNode,
+    RecoveryEvent, RecoveryOrchestrator, RecoveryPolicy, RoutingTable, SeedNode, SpanningTree,
+    TopologyStrategy, WorkerNode,
 };
 pub use collective::{CollectiveGroup, CollectiveHandle};
 pub use config::NexarConfig;

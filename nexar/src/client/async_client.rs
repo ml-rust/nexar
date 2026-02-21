@@ -1,4 +1,5 @@
 use crate::cluster::HealthMonitor;
+use crate::cluster::sparse::RoutingTable;
 use crate::config::NexarConfig;
 use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
@@ -7,6 +8,7 @@ use crate::rpc::RpcDispatcher;
 use crate::rpc::registry::{RpcHandler, RpcRegistry};
 use crate::transport::PeerConnection;
 use crate::transport::buffer_pool::{BufferPool, PoolProfile, PooledBuf};
+use crate::transport::relay::RelayDeliveries;
 use crate::transport::router::PeerRouter;
 use crate::types::{Priority, Rank};
 use std::collections::HashMap;
@@ -63,16 +65,10 @@ pub struct NexarClient {
     /// Communicator ID. 0 = default (root) communicator.
     pub(super) comm_id: u64,
     /// Sending side: one `PeerConnection` per remote rank.
-    /// For split clients, this contains only the peers in this comm group,
-    /// keyed by the NEW rank within the group.
     pub(crate) peers: HashMap<Rank, Arc<PeerConnection>>,
     /// Receiving side: one `PeerRouter` per remote rank.
-    /// For split clients, this is a reference to the parent's routers
-    /// (keyed by the ORIGINAL rank). The split client uses comm-specific
-    /// raw channels instead of the router's default raw lane.
     pub(super) routers: HashMap<Rank, PeerRouter>,
-    /// How this client receives raw bytes. Default clients use Router,
-    /// split clients use Comm with per-comm_id channels.
+    /// How this client receives raw bytes.
     pub(super) raw_recv: RawRecvSource,
     /// Background tasks; kept alive for the lifetime of this client.
     pub(super) _router_handles: Vec<tokio::task::JoinHandle<Result<()>>>,
@@ -82,17 +78,13 @@ pub struct NexarClient {
     pub(super) barrier_epoch: AtomicU64,
     pub(super) rpc_registry: Arc<RwLock<RpcRegistry>>,
     pub(super) rpc_req_id: AtomicU64,
-    /// Per-client split generation counter. All ranks in a communicator advance
-    /// this in lockstep (since `split()` is called collectively), so it can be
-    /// used to derive deterministic comm_ids.
+    /// Per-client split generation counter.
     pub(super) split_generation: AtomicU64,
     /// Global rank mapping: new_rank -> original_rank (for split clients).
-    /// Empty for the root communicator.
     pub(super) rank_map: HashMap<Rank, Rank>,
-    /// Counter for generating unique collective tags (for non-blocking collectives).
+    /// Counter for generating unique collective tags.
     pub(super) collective_tag: AtomicU64,
-    /// Cached receivers for tagged channels: (original_rank, tag) -> Receiver.
-    /// Lazily created on first `recv_bytes_tagged` call per (rank, tag) pair.
+    /// Cached receivers for tagged channels.
     pub(super) tagged_receivers: Mutex<TaggedReceiverMap>,
     /// Runtime configuration (timeouts, thresholds).
     pub(crate) config: Arc<NexarConfig>,
@@ -100,8 +92,16 @@ pub struct NexarClient {
     pub(super) failure_tx: Arc<watch::Sender<Vec<Rank>>>,
     /// Receiver for failure notifications (application reads here).
     pub(super) failure_rx: watch::Receiver<Vec<Rank>>,
-    /// Heartbeat monitor background task handle (kept alive for the client's lifetime).
+    /// Heartbeat monitor background task handle.
     pub(super) _monitor_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Routing table for sparse topologies (None for full mesh).
+    pub(crate) routing_table: Option<Arc<RoutingTable>>,
+    /// Relay delivery channels for messages arriving via intermediate hops.
+    pub(crate) relay_deliveries: Option<Arc<RelayDeliveries>>,
+    /// Background relay listener task handles.
+    pub(super) _relay_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// QUIC client endpoints kept alive so their UDP sockets remain open.
+    pub(crate) _endpoints: Vec<quinn::Endpoint>,
 }
 
 impl NexarClient {
@@ -150,42 +150,7 @@ impl NexarClient {
         config: NexarConfig,
     ) -> Self {
         let pool = BufferPool::with_profile(profile);
-        let mut peer_arcs: HashMap<Rank, Arc<PeerConnection>> = HashMap::new();
-        let mut routers: HashMap<Rank, PeerRouter> = HashMap::new();
-        let mut handles = Vec::new();
-
-        for (peer_rank, peer_conn) in peers {
-            let conn_clone = peer_conn.conn.clone();
-            let (router, handle) = PeerRouter::spawn(peer_rank, conn_clone, Arc::clone(&pool));
-            peer_arcs.insert(peer_rank, Arc::new(peer_conn));
-            routers.insert(peer_rank, router);
-            handles.push(handle);
-        }
-
-        let (failure_tx, failure_rx, monitor_handle) = Self::spawn_monitor(&config, &peer_arcs);
-
-        Self {
-            rank,
-            world_size,
-            comm_id: 0,
-            peers: peer_arcs,
-            routers,
-            raw_recv: RawRecvSource::Router,
-            _router_handles: handles,
-            adapter,
-            _pool: pool,
-            barrier_epoch: AtomicU64::new(0),
-            rpc_registry: Arc::new(RwLock::new(RpcRegistry::new())),
-            rpc_req_id: AtomicU64::new(0),
-            split_generation: AtomicU64::new(0),
-            rank_map: HashMap::new(),
-            collective_tag: AtomicU64::new(1), // Start at 1; tag 0 is reserved for untagged
-            tagged_receivers: Mutex::new(HashMap::new()),
-            config: Arc::new(config),
-            failure_tx,
-            failure_rx,
-            _monitor_handle: Some(monitor_handle),
-        }
+        Self::build(rank, world_size, peers, adapter, pool, config)
     }
 
     /// Create a client with a user-supplied buffer pool.
@@ -211,6 +176,18 @@ impl NexarClient {
 
     /// Create a client with a user-supplied buffer pool and config.
     pub fn new_with_pool_and_config(
+        rank: Rank,
+        world_size: u32,
+        peers: HashMap<Rank, PeerConnection>,
+        adapter: Arc<dyn DeviceAdapter>,
+        pool: Arc<BufferPool>,
+        config: NexarConfig,
+    ) -> Self {
+        Self::build(rank, world_size, peers, adapter, pool, config)
+    }
+
+    /// Shared constructor logic for all `new_*` variants.
+    fn build(
         rank: Rank,
         world_size: u32,
         peers: HashMap<Rank, PeerConnection>,
@@ -253,6 +230,10 @@ impl NexarClient {
             failure_tx,
             failure_rx,
             _monitor_handle: Some(monitor_handle),
+            routing_table: None,
+            relay_deliveries: None,
+            _relay_handles: Vec::new(),
+            _endpoints: Vec::new(),
         }
     }
 
@@ -281,97 +262,9 @@ impl NexarClient {
         reg.register(fn_id, handler);
     }
 
-    /// Call a remote function on the target rank and wait for the response.
-    pub async fn rpc(&self, target: Rank, fn_id: u16, args: &[u8]) -> Result<Vec<u8>> {
-        self.rpc_with_timeout(target, fn_id, args, self.config.rpc_timeout)
-            .await
-    }
-
-    /// Call a remote function with a custom timeout.
-    pub async fn rpc_with_timeout(
-        &self,
-        target: Rank,
-        fn_id: u16,
-        args: &[u8],
-        timeout: std::time::Duration,
-    ) -> Result<Vec<u8>> {
-        let req_id = self.rpc_req_id.fetch_add(1, Ordering::Relaxed);
-
-        // For split clients, resolve to the original rank for router lookup.
-        let original_target = self.resolve_rank(target);
-        let router = self
-            .routers
-            .get(&original_target)
-            .ok_or(NexarError::UnknownPeer { rank: target })?;
-
-        let rx = router.register_rpc_waiter(req_id).await;
-
-        let peer = self.peer(target)?;
-        let request = NexarMessage::Rpc {
-            req_id,
-            fn_id,
-            payload: args.to_vec(),
-        };
-        if let Err(e) = peer.send_message(&request, Priority::Realtime).await {
-            router.remove_rpc_waiter(req_id).await;
-            return Err(e);
-        }
-
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(msg)) => match msg {
-                NexarMessage::RpcResponse { payload, .. } => Ok(payload),
-                other => Err(NexarError::RpcFailed {
-                    rank: target,
-                    reason: format!("expected RpcResponse, got {other:?}"),
-                }),
-            },
-            Ok(Err(_)) => Err(NexarError::PeerDisconnected { rank: target }),
-            Err(_) => {
-                router.remove_rpc_waiter(req_id).await;
-                Err(NexarError::RpcFailed {
-                    rank: target,
-                    reason: format!(
-                        "RPC fn_id={fn_id} timed out after {}ms",
-                        timeout.as_millis()
-                    ),
-                })
-            }
-        }
-    }
-
     /// Get a reference to the RPC dispatcher for this client.
     pub fn rpc_dispatcher(&self) -> RpcDispatcher {
         RpcDispatcher::new(Arc::clone(&self.rpc_registry))
-    }
-
-    /// Receive the next message from the control lane for a given peer.
-    pub(crate) async fn recv_control(&self, src: Rank) -> Result<NexarMessage> {
-        let original_src = self.resolve_rank(src);
-        let router = self
-            .routers
-            .get(&original_src)
-            .ok_or(NexarError::UnknownPeer { rank: src })?;
-        router.recv_control(original_src).await
-    }
-
-    /// Receive the next RPC request from the rpc_requests lane for a given peer.
-    pub async fn recv_rpc_request(&self, src: Rank) -> Result<NexarMessage> {
-        let original_src = self.resolve_rank(src);
-        let router = self
-            .routers
-            .get(&original_src)
-            .ok_or(NexarError::UnknownPeer { rank: src })?;
-        router.recv_rpc_request(original_src).await
-    }
-
-    /// Receive the next data message from the data lane for a given peer.
-    async fn recv_data_message(&self, src: Rank) -> Result<NexarMessage> {
-        let original_src = self.resolve_rank(src);
-        let router = self
-            .routers
-            .get(&original_src)
-            .ok_or(NexarError::UnknownPeer { rank: src })?;
-        router.recv_data(original_src).await
     }
 
     /// This client's rank within its communicator group (0-indexed).
@@ -431,14 +324,13 @@ impl NexarClient {
         }
 
         let data = unsafe { self.adapter.stage_for_send(data_ptr, size)? };
-        let peer = self.peer(dest)?;
 
         let msg = NexarMessage::Data {
             tag,
             src_rank: self.rank,
             payload: data,
         };
-        peer.send_message(&msg, Priority::Bulk).await
+        self.send_message_to(dest, &msg, Priority::Bulk).await
     }
 
     /// Receive tagged data from a specific rank.
@@ -453,7 +345,12 @@ impl NexarClient {
             });
         }
 
-        let msg = self.recv_data_message(src).await?;
+        // For non-neighbor sources in sparse topology, receive via relay.
+        let msg = if !self.has_direct_peer(src) && self.relay_deliveries.is_some() {
+            self.recv_control_from(src).await?
+        } else {
+            self.recv_data_message(src).await?
+        };
 
         match msg {
             NexarMessage::Data {
@@ -473,81 +370,6 @@ impl NexarClient {
                     });
                 }
                 unsafe { self.adapter.receive_to_device(&payload, buf_ptr)? };
-                Ok(())
-            }
-            other => Err(NexarError::DecodeFailed(format!(
-                "expected Data message, got {other:?}"
-            ))),
-        }
-    }
-
-    /// Send non-contiguous data (scatter-gather) to a specific rank.
-    ///
-    /// Gathers the regions into a contiguous buffer and sends as a single message.
-    ///
-    /// # Safety
-    /// Each region's `ptr` must be valid for its `len` bytes.
-    pub async unsafe fn send_iov(
-        &self,
-        regions: &[crate::types::IoVec],
-        dest: Rank,
-        tag: u32,
-    ) -> Result<()> {
-        if dest >= self.world_size {
-            return Err(NexarError::InvalidRank {
-                rank: dest,
-                world_size: self.world_size,
-            });
-        }
-        let data = unsafe { self.adapter.stage_for_send_iov(regions)? };
-        let peer = self.peer(dest)?;
-        let msg = NexarMessage::Data {
-            tag,
-            src_rank: self.rank,
-            payload: data,
-        };
-        peer.send_message(&msg, Priority::Bulk).await
-    }
-
-    /// Receive data and scatter into non-contiguous regions.
-    ///
-    /// # Safety
-    /// Each region's `ptr` must be valid for its `len` bytes.
-    /// The total size of all regions must match the received data size.
-    pub async unsafe fn recv_iov(
-        &self,
-        regions: &[crate::types::IoVec],
-        src: Rank,
-        tag: u32,
-    ) -> Result<()> {
-        if src >= self.world_size {
-            return Err(NexarError::InvalidRank {
-                rank: src,
-                world_size: self.world_size,
-            });
-        }
-
-        let expected: usize = regions.iter().map(|r| r.len).sum();
-        let msg = self.recv_data_message(src).await?;
-
-        match msg {
-            NexarMessage::Data {
-                tag: recv_tag,
-                payload,
-                ..
-            } => {
-                if recv_tag != tag {
-                    return Err(NexarError::DecodeFailed(format!(
-                        "tag mismatch: expected {tag}, got {recv_tag}"
-                    )));
-                }
-                if payload.len() != expected {
-                    return Err(NexarError::BufferSizeMismatch {
-                        expected,
-                        actual: payload.len(),
-                    });
-                }
-                unsafe { self.adapter.receive_to_device_iov(&payload, regions)? };
                 Ok(())
             }
             other => Err(NexarError::DecodeFailed(format!(
@@ -578,5 +400,15 @@ impl NexarClient {
         for peer in self.peers.values() {
             peer.conn.close(0u32.into(), b"closed");
         }
+    }
+
+    /// Returns true if `rank` is a direct peer (has a QUIC connection).
+    pub fn has_direct_peer(&self, rank: Rank) -> bool {
+        self.peers.contains_key(&rank)
+    }
+
+    /// Returns true if the topology is sparse (not full mesh).
+    pub fn is_sparse(&self) -> bool {
+        self.routing_table.is_some()
     }
 }

@@ -3,11 +3,15 @@
 //! All values have sensible defaults. Override via environment variables
 //! (prefixed `NEXAR_`) or by constructing a custom `NexarConfig`.
 
+use crate::cluster::sparse::TopologyStrategy;
 use std::time::Duration;
 
 /// Tuning parameters for collective operations and transport.
 #[derive(Debug, Clone)]
 pub struct NexarConfig {
+    /// Topology strategy for the peer mesh.
+    pub topology: TopologyStrategy,
+
     /// Timeout for individual send/recv operations within collectives.
     pub collective_timeout: Duration,
 
@@ -82,6 +86,7 @@ pub struct NexarConfig {
 impl Default for NexarConfig {
     fn default() -> Self {
         Self {
+            topology: TopologyStrategy::default(),
             collective_timeout: Duration::from_secs(30),
             barrier_timeout: Duration::from_secs(30),
             rpc_timeout: Duration::from_secs(30),
@@ -177,6 +182,12 @@ impl NexarConfig {
             && let Ok(s) = v.parse::<u64>()
         {
             cfg.recovery_timeout = Duration::from_secs(s);
+        }
+
+        if let Ok(v) = std::env::var("NEXAR_TOPOLOGY")
+            && let Some(topo) = crate::cluster::sparse::parse_topology(&v)
+        {
+            cfg.topology = topo;
         }
 
         if let Ok(v) = std::env::var("NEXAR_ELASTIC_ENABLED") {

@@ -89,6 +89,10 @@ pub(crate) fn datacenter_transport_config() -> quinn::TransportConfig {
             .try_into()
             .expect("30s fits in IdleTimeout"),
     ));
+    // Allow many concurrent unidirectional streams. Each tagged send opens a
+    // new uni stream, and the stream pool pre-opens 8 per connection.
+    // Default (quinn 0.11) is 0 for uni streams, which blocks all sends.
+    config.max_concurrent_uni_streams(quinn::VarInt::from_u32(1024));
     config
 }
 

@@ -42,6 +42,8 @@ pub struct PeerRouter {
     /// Channels are lazily created when tagged data arrives or when
     /// `register_tag` is called, whichever comes first.
     tagged: Arc<Mutex<HashMap<u64, TaggedChannel>>>,
+    /// Relay messages for sparse topology forwarding/delivery.
+    pub relay: Mutex<mpsc::Receiver<NexarMessage>>,
 }
 
 /// A communicator channel. Lazily created when either a message arrives or
@@ -75,6 +77,7 @@ struct RouterSenders {
     raw: mpsc::Sender<PooledBuf>,
     raw_comms: Arc<Mutex<HashMap<u64, CommChannel>>>,
     tagged: Arc<Mutex<HashMap<u64, TaggedChannel>>>,
+    relay: mpsc::Sender<NexarMessage>,
     pool: Arc<BufferPool>,
 }
 
@@ -89,6 +92,7 @@ impl PeerRouter {
         let (ctrl_tx, ctrl_rx) = mpsc::channel(LANE_CAPACITY);
         let (data_tx, data_rx) = mpsc::channel(LANE_CAPACITY);
         let (raw_tx, raw_rx) = mpsc::channel(LANE_CAPACITY);
+        let (relay_tx, relay_rx) = mpsc::channel(LANE_CAPACITY);
 
         let rpc_waiters: Arc<Mutex<HashMap<u64, oneshot::Sender<NexarMessage>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -105,6 +109,7 @@ impl PeerRouter {
             raw: raw_tx,
             raw_comms: Arc::clone(&raw_comms),
             tagged: Arc::clone(&tagged),
+            relay: relay_tx,
             pool,
         };
 
@@ -118,6 +123,7 @@ impl PeerRouter {
             raw: Mutex::new(raw_rx),
             raw_comms,
             tagged,
+            relay: Mutex::new(relay_rx),
         };
 
         (router, handle)
@@ -206,6 +212,14 @@ impl PeerRouter {
     /// Remove a previously registered tag channel.
     pub async fn remove_tag(&self, tag: u64) {
         self.tagged.lock().await.remove(&tag);
+    }
+
+    /// Take the relay receiver out of this router (for the relay listener task).
+    pub async fn take_relay_rx(&self) -> Option<mpsc::Receiver<NexarMessage>> {
+        let mut rx = self.relay.lock().await;
+        // Swap with a dummy closed channel.
+        let (_, dummy) = mpsc::channel(1);
+        Some(std::mem::replace(&mut *rx, dummy))
     }
 
     /// Receive raw bytes from the raw lane (default comm_id 0).
@@ -379,6 +393,11 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) -> Result<()> {
         }
         NexarMessage::Data { .. } => {
             if tx.data.send(msg).await.is_err() {
+                return Err(NexarError::PeerDisconnected { rank: tx.rank });
+            }
+        }
+        NexarMessage::Relay { .. } => {
+            if tx.relay.send(msg).await.is_err() {
                 return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }
         }
