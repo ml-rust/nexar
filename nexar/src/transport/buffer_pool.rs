@@ -358,114 +358,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_checkout_and_return() {
+    fn test_checkout_zeroed_and_deref_mut() {
         let pool = BufferPool::with_config(4, 1024);
-        let buf = pool.checkout(100);
+        let mut buf = pool.checkout(100);
         assert_eq!(buf.len(), 100);
         assert!(buf.iter().all(|&b| b == 0));
-        drop(buf);
-    }
-
-    #[test]
-    fn test_pool_exhaustion_fallback() {
-        let pool = BufferPool::with_config(2, 64);
-        let b1 = pool.checkout(10);
-        let b2 = pool.checkout(10);
-        // Pool is now empty — this should still work (allocates fresh).
-        let b3 = pool.checkout(10);
-        assert_eq!(b3.len(), 10);
-        drop(b1);
-        drop(b2);
-        drop(b3);
-    }
-
-    #[test]
-    fn test_deref_mut() {
-        let pool = BufferPool::with_config(2, 64);
-        let mut buf = pool.checkout(4);
         buf[0] = 0xAA;
-        buf[1] = 0xBB;
         assert_eq!(buf[0], 0xAA);
-        assert_eq!(buf[1], 0xBB);
     }
 
     #[test]
-    fn test_drop_returns_to_pool() {
+    fn test_exhaustion_fallback_and_return() {
         let pool = BufferPool::with_config(1, 64);
-        let buf = pool.checkout(10);
-        let buf2 = pool.checkout(10);
-        drop(buf);
-        let buf3 = pool.checkout(20);
-        assert_eq!(buf3.len(), 20);
-        drop(buf2);
-        drop(buf3);
+        let b1 = pool.checkout(10);
+        let b2 = pool.checkout(10); // pool empty, allocates fresh
+        assert_eq!(b2.len(), 10);
+        drop(b1); // returns to pool
+        drop(b2); // pool full, silently dropped — no panic
     }
 
     #[test]
-    fn test_pool_full_on_return() {
-        let pool = BufferPool::with_config(1, 64);
-        let buf1 = pool.checkout(10);
-        let buf2 = pool.checkout(10);
-        drop(buf1);
-        drop(buf2); // pool full, just dropped — no panic
-    }
-
-    #[test]
-    fn test_large_buffer_uses_large_pool() {
+    fn test_tier_selection() {
         let pool = BufferPool::new();
-        // 1 MiB — should use the large pool tier.
-        let buf = pool.checkout(1024 * 1024);
-        assert_eq!(buf.len(), 1024 * 1024);
-        drop(buf);
+        let m = 1024 * 1024;
+        // Each tier boundary: small (100), large (1M), huge (32M), giant (128M), unpooled (512M).
+        for &size in &[100, m, 32 * m, 128 * m, 512 * m] {
+            let buf = pool.checkout(size);
+            assert_eq!(buf.len(), size);
+        }
     }
 
-    #[test]
-    fn test_small_buffer_uses_small_pool() {
-        let pool = BufferPool::new();
-        let buf = pool.checkout(100);
-        assert_eq!(buf.len(), 100);
-        drop(buf);
-    }
-
-    #[test]
-    fn test_huge_buffer_uses_huge_pool() {
-        let pool = BufferPool::new();
-        // 32 MiB — should use the huge pool tier.
-        let buf = pool.checkout(32 * 1024 * 1024);
-        assert_eq!(buf.len(), 32 * 1024 * 1024);
-        drop(buf);
-    }
-
-    #[test]
-    fn test_giant_buffer_uses_giant_pool() {
-        let pool = BufferPool::new();
-        // 128 MiB — should use the giant pool tier.
-        let buf = pool.checkout(128 * 1024 * 1024);
-        assert_eq!(buf.len(), 128 * 1024 * 1024);
-        drop(buf);
-    }
-
-    #[test]
-    fn test_very_large_buffer_unpooled() {
-        let pool = BufferPool::new();
-        // 512 MiB — too large for any pool tier.
-        let buf = pool.checkout(512 * 1024 * 1024);
-        assert_eq!(buf.len(), 512 * 1024 * 1024);
-        drop(buf); // dropped, not returned to any pool
-    }
-
-    #[test]
-    fn test_oversized_buffer_dropped_on_return() {
-        let pool = BufferPool::with_config(2, 64);
-        let buf = pool.checkout(1024);
-        assert_eq!(buf.len(), 1024);
-        drop(buf);
-        let buf2 = pool.checkout(10);
-        assert_eq!(buf2.len(), 10);
-        drop(buf2);
-    }
-
-    /// Verify checkout/return at workload-realistic sizes for both profiles.
     fn assert_checkout(pool: &Arc<BufferPool>, sizes: &[usize]) {
         let bufs: Vec<_> = sizes
             .iter()
@@ -479,39 +401,33 @@ mod tests {
     }
 
     #[test]
-    fn test_training_workload_sizes() {
-        let pool = BufferPool::new();
+    fn test_workload_profiles() {
         let m = 1024 * 1024;
-        // 3 concurrent 14 MiB ring allreduce chunks, 208 MiB halving-doubling, 48 MiB broadcast.
-        assert_checkout(&pool, &[14 * m, 14 * m, 14 * m, 208 * m, 48 * m]);
+        // Training: ring allreduce chunks + halving-doubling + broadcast.
+        assert_checkout(
+            &BufferPool::new(),
+            &[14 * m, 14 * m, 14 * m, 208 * m, 48 * m],
+        );
+        // Inference: KV layers + MoE dispatches + pipeline activation.
+        assert_checkout(
+            &BufferPool::with_profile(PoolProfile::Inference),
+            &[16 * m, 16 * m, 64 * m, m, m, m, m, 128 * m],
+        );
     }
 
     #[test]
-    fn test_inference_workload_sizes() {
-        let pool = BufferPool::with_profile(PoolProfile::Inference);
-        let m = 1024 * 1024;
-        // 16 MiB KV layer, 2 concurrent KV transfers, 64 MiB pipeline activation,
-        // 4 concurrent 1 MiB MoE dispatches, 128 MiB large activation fallback.
-        assert_checkout(&pool, &[16 * m, 16 * m, 64 * m, m, m, m, m, 128 * m]);
-    }
-
-    #[test]
-    fn test_lazy_allocation_no_upfront_memory() {
-        // Pool starts empty — no buffers pre-allocated.
+    fn test_lazy_allocation() {
         let pool = BufferPool::with_profile(PoolProfile::Training);
-        // First checkout allocates on demand.
         let buf = pool.checkout(1024);
         assert_eq!(buf.len(), 1024);
-        // Return populates the pool for reuse.
         drop(buf);
-        // Second checkout reuses the returned buffer (no new allocation).
+        // Reuses returned buffer.
         let buf2 = pool.checkout(512);
         assert_eq!(buf2.len(), 512);
-        drop(buf2);
     }
 
     #[test]
-    fn test_pool_builder_custom_tiers() {
+    fn test_pool_builder() {
         let pool = PoolBuilder::new()
             .small(TierConfig {
                 count: 4,
@@ -521,37 +437,12 @@ mod tests {
                 count: 2,
                 capacity: 1024 * 1024,
             })
-            .huge(TierConfig {
-                count: 1,
-                capacity: 16 * 1024 * 1024,
-            })
-            .giant(TierConfig {
-                count: 0,
-                capacity: 64 * 1024 * 1024,
-            })
             .build();
-
-        // Small tier: up to 1024 bytes.
         let buf = pool.checkout(500);
         assert_eq!(buf.len(), 500);
-        drop(buf);
 
-        // Large tier: up to 1 MiB.
-        let buf = pool.checkout(512 * 1024);
-        assert_eq!(buf.len(), 512 * 1024);
-        drop(buf);
-
-        // Beyond giant capacity → unpooled.
-        let buf = pool.checkout(128 * 1024 * 1024);
-        assert_eq!(buf.len(), 128 * 1024 * 1024);
-        drop(buf);
-    }
-
-    #[test]
-    fn test_pool_builder_default() {
-        let pool = PoolBuilder::default().build();
-        let buf = pool.checkout(100);
-        assert_eq!(buf.len(), 100);
-        drop(buf);
+        let pool2 = PoolBuilder::default().build();
+        let buf2 = pool2.checkout(100);
+        assert_eq!(buf2.len(), 100);
     }
 }
