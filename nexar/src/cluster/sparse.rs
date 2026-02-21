@@ -173,9 +173,67 @@ pub fn build_spanning_tree(
     SpanningTree { parent, children }
 }
 
+/// Find an alternative next hop to reach `dest`, excluding `failed_hop`.
+///
+/// Builds the neighbor set for `rank`, removes `failed_hop`, and picks the
+/// neighbor closest to `dest` using the strategy's routing logic.
+/// Returns `None` if no alternative neighbor exists.
+pub fn find_alternative_hop(
+    strategy: &TopologyStrategy,
+    rank: Rank,
+    dest: Rank,
+    failed_hop: Rank,
+    world_size: u32,
+) -> Option<Rank> {
+    let neighbors = build_neighbors(strategy, rank, world_size);
+    let candidates: Vec<Rank> = neighbors.into_iter().filter(|&n| n != failed_hop).collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    match strategy {
+        TopologyStrategy::FullMesh => {
+            unreachable!(
+                "FullMesh has no routing table, so relay/alternative-hop logic is never invoked"
+            )
+        }
+        TopologyStrategy::KRegular { .. } => {
+            // Pick candidate closest to dest on the ring.
+            candidates
+                .into_iter()
+                .min_by_key(|&n| ring_distance(n, dest, world_size))
+        }
+        TopologyStrategy::Hypercube => {
+            // Pick candidate that shares the most bits with dest (reduces XOR distance).
+            candidates
+                .into_iter()
+                .min_by_key(|&n| (n ^ dest).count_ones())
+        }
+    }
+}
+
 /// Parse a topology strategy from a string.
 ///
 /// Formats: "full_mesh", "k_regular:8", "hypercube"
+/// Recompute routing table for the given topology, returning `None` for full mesh
+/// (which needs no routing table since all peers are direct neighbors).
+pub fn recompute_routing_table(
+    topology: &TopologyStrategy,
+    rank: Rank,
+    world_size: u32,
+) -> Option<std::sync::Arc<RoutingTable>> {
+    if matches!(topology, TopologyStrategy::FullMesh) {
+        // Full mesh needs no routing table — every node is a direct peer,
+        // so sends always go straight to the destination without relaying.
+        None
+    } else {
+        Some(std::sync::Arc::new(build_routing_table(
+            topology, rank, world_size,
+        )))
+    }
+}
+
 pub fn parse_topology(s: &str) -> Option<TopologyStrategy> {
     let s = s.trim().to_lowercase();
     if s == "full_mesh" {
@@ -283,6 +341,54 @@ mod tests {
             Some(TopologyStrategy::KRegular { degree: 8 })
         );
         assert_eq!(parse_topology("invalid"), None);
+    }
+
+    #[test]
+    fn test_find_alternative_hop() {
+        // KRegular degree=4, rank=0, world=16 => neighbors {14, 15, 1, 2}
+        // Normal hop to 5 would be 2. If 2 fails, should pick 1 (distance 4 to 5).
+        let alt = find_alternative_hop(&TopologyStrategy::KRegular { degree: 4 }, 0, 5, 2, 16);
+        assert!(alt.is_some());
+        let hop = alt.unwrap();
+        assert_ne!(hop, 2);
+        // Verify chosen hop is a valid neighbor.
+        let neighbors = build_neighbors(&TopologyStrategy::KRegular { degree: 4 }, 0, 16);
+        assert!(
+            neighbors.contains(&hop),
+            "hop {hop} not in neighbors {neighbors:?}"
+        );
+
+        // Hypercube: rank=0, world=8, dest=7 (111). Normal hop=4 (100).
+        // If 4 fails, alternatives are 1 (001) and 2 (010).
+        // 1^7=6 (pop=2), 2^7=5 (pop=2) — either works.
+        let alt = find_alternative_hop(&TopologyStrategy::Hypercube, 0, 7, 4, 8);
+        assert!(alt.is_some());
+        let hop = alt.unwrap();
+        assert_ne!(hop, 4);
+        let neighbors = build_neighbors(&TopologyStrategy::Hypercube, 0, 8);
+        assert!(
+            neighbors.contains(&hop),
+            "hop {hop} not in neighbors {neighbors:?}"
+        );
+    }
+
+    #[test]
+    fn test_find_alternative_hop_degree_2() {
+        // Minimal neighbors: KRegular{2} => each rank has only 2 neighbors (±1).
+        // Rank 0, world=8: neighbors {7, 1}. If hop 1 fails, must pick 7.
+        let alt = find_alternative_hop(&TopologyStrategy::KRegular { degree: 2 }, 0, 3, 1, 8);
+        assert_eq!(alt, Some(7));
+    }
+
+    #[test]
+    fn test_find_alternative_hop_no_candidate() {
+        // KRegular{2}: rank 0 has neighbors {7, 1}. If dest=3 and failed_hop=7,
+        // only candidate is 1. But if we also remove 1 (by making it the failed_hop),
+        // and add 7 as failed — only 1 remains.
+        // Test where ALL neighbors are the failed hop: degree=2, both neighbors fail.
+        // Actually can only fail one hop. With degree=2, removing one leaves one.
+        let alt = find_alternative_hop(&TopologyStrategy::KRegular { degree: 2 }, 0, 5, 7, 8);
+        assert_eq!(alt, Some(1));
     }
 
     #[test]
