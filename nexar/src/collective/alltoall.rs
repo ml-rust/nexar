@@ -1,5 +1,5 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send, step_tag};
 use crate::error::{NexarError, Result};
 use crate::types::DataType;
 
@@ -41,9 +41,10 @@ pub(crate) async unsafe fn alltoall(
         let send_off = send_to * chunk_bytes;
         let send_data = &send_buf[send_off..send_off + chunk_bytes];
 
+        let round_tag = step_tag(tag, step);
         let (_, received) = tokio::try_join!(
-            collective_send(client, send_to as u32, send_data, "alltoall", tag),
-            collective_recv(client, recv_from as u32, "alltoall", tag),
+            collective_send(client, send_to as u32, send_data, "alltoall", round_tag),
+            collective_recv(client, recv_from as u32, "alltoall", round_tag),
         )?;
 
         if received.len() != chunk_bytes {

@@ -1,5 +1,5 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send, step_tag};
 use crate::error::{NexarError, Result};
 use crate::types::DataType;
 
@@ -50,9 +50,10 @@ pub(crate) async unsafe fn ring_allgather(
 
         let send_data = buf[send_idx * chunk_bytes..(send_idx + 1) * chunk_bytes].to_vec();
 
+        let round_tag = step_tag(tag, step);
         let (_, received) = tokio::try_join!(
-            collective_send(client, next as u32, &send_data, "allgather", tag),
-            collective_recv(client, prev as u32, "allgather", tag),
+            collective_send(client, next as u32, &send_data, "allgather", round_tag),
+            collective_recv(client, prev as u32, "allgather", round_tag),
         )?;
 
         if received.len() != chunk_bytes {

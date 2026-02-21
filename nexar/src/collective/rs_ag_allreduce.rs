@@ -8,7 +8,9 @@
 //! by distributing remainder elements across ranks via [`ChunkLayout`].
 
 use crate::client::NexarClient;
-use crate::collective::helpers::{ChunkLayout, CollectiveTag, collective_recv, collective_send};
+use crate::collective::helpers::{
+    ChunkLayout, CollectiveTag, collective_recv, collective_send, step_tag,
+};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
@@ -65,9 +67,16 @@ pub(crate) async unsafe fn rs_ag_allreduce(
 
         let send_slice = &buf[send_off..send_off + send_len];
 
+        let round_tag = step_tag(rs_tag, step);
         let (_, received) = tokio::try_join!(
-            collective_send(client, next as u32, send_slice, "rs_ag_allreduce", rs_tag),
-            collective_recv(client, prev as u32, "rs_ag_allreduce", rs_tag),
+            collective_send(
+                client,
+                next as u32,
+                send_slice,
+                "rs_ag_allreduce",
+                round_tag
+            ),
+            collective_recv(client, prev as u32, "rs_ag_allreduce", round_tag),
         )?;
 
         if received.len() != recv_len {
@@ -92,9 +101,16 @@ pub(crate) async unsafe fn rs_ag_allreduce(
 
         let send_slice = &buf[send_off..send_off + send_len];
 
+        let round_tag = step_tag(ag_tag, step);
         let (_, received) = tokio::try_join!(
-            collective_send(client, next as u32, send_slice, "rs_ag_allreduce", ag_tag),
-            collective_recv(client, prev as u32, "rs_ag_allreduce", ag_tag),
+            collective_send(
+                client,
+                next as u32,
+                send_slice,
+                "rs_ag_allreduce",
+                round_tag
+            ),
+            collective_recv(client, prev as u32, "rs_ag_allreduce", round_tag),
         )?;
 
         if received.len() != recv_len {

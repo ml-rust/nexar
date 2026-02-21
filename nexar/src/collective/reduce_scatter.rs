@@ -1,5 +1,5 @@
 use crate::client::NexarClient;
-use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send, step_tag};
 use crate::error::{NexarError, Result};
 use crate::reduce::reduce_slice;
 use crate::types::{DataType, ReduceOp};
@@ -49,9 +49,10 @@ pub(crate) async unsafe fn ring_reduce_scatter(
 
         let send_data = buf[send_off..send_off + chunk_bytes].to_vec();
 
+        let round_tag = step_tag(tag, step);
         let (_, received) = tokio::try_join!(
-            collective_send(client, next as u32, &send_data, "reduce_scatter", tag),
-            collective_recv(client, prev as u32, "reduce_scatter", tag),
+            collective_send(client, next as u32, &send_data, "reduce_scatter", round_tag),
+            collective_recv(client, prev as u32, "reduce_scatter", round_tag),
         )?;
 
         if received.len() != chunk_bytes {

@@ -14,7 +14,7 @@
 //! memory per rank regardless of world size.
 
 use crate::client::NexarClient;
-use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send};
+use crate::collective::helpers::{CollectiveTag, collective_recv, collective_send, step_tag};
 use crate::compression::{CompressedTensor, Compressor};
 use crate::error::Result;
 use crate::reduce::reduce_slice;
@@ -89,9 +89,10 @@ pub async unsafe fn ring_allreduce_compressed(
     let mut to_forward = my_compressed;
     let mut dense_tmp = vec![0u8; total_bytes];
     for _step in 0..(world - 1) {
+        let round_tag = step_tag(tag, _step);
         let (_, received) = tokio::try_join!(
-            collective_send(client, next, &to_forward, "allreduce_compressed", tag),
-            collective_recv(client, prev, "allreduce_compressed", tag),
+            collective_send(client, next, &to_forward, "allreduce_compressed", round_tag),
+            collective_recv(client, prev, "allreduce_compressed", round_tag),
         )?;
         to_forward = received.to_vec();
 

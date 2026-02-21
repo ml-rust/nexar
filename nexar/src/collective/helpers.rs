@@ -68,7 +68,19 @@ pub(crate) fn collective_timeout(client: &NexarClient) -> Duration {
 /// internally by barrier).
 pub(crate) type CollectiveTag = Option<u64>;
 
+/// Offset a collective tag by a step number to produce a unique per-round tag.
+///
+/// Essential for sparse topologies where relay messages use separate QUIC
+/// streams and can arrive out of order. Each round of a multi-step collective
+/// must use a distinct tag to prevent message confusion.
+pub(crate) fn step_tag(base: CollectiveTag, step: usize) -> CollectiveTag {
+    base.map(|t| t.wrapping_mul(1000).wrapping_add(step as u64))
+}
+
 /// Send bytes to a peer with tag-based routing and timeout.
+///
+/// For sparse topologies, automatically relays through intermediate hops
+/// when `dest` is not a direct neighbor.
 pub(crate) async fn collective_send(
     client: &NexarClient,
     dest: Rank,
@@ -77,6 +89,38 @@ pub(crate) async fn collective_send(
     tag: CollectiveTag,
 ) -> Result<()> {
     let timeout = collective_timeout(client);
+
+    // Sparse topology relay path: if dest is not a direct peer, relay.
+    if !client.has_direct_peer(dest)
+        && let (Some(rt), Some(t)) = (&client.routing_table, tag)
+    {
+        let result = tokio::time::timeout(
+            timeout,
+            crate::transport::relay::send_or_relay_tagged(
+                client.rank(),
+                &client.peers,
+                rt,
+                dest,
+                t,
+                data,
+            ),
+        )
+        .await;
+        return match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(NexarError::CollectiveFailed {
+                operation,
+                rank: dest,
+                reason: e.to_string(),
+            }),
+            Err(_) => Err(NexarError::CollectiveFailed {
+                operation,
+                rank: dest,
+                reason: format!("relay send timed out after {}s", timeout.as_secs()),
+            }),
+        };
+    }
+
     let result = match tag {
         Some(t) => {
             tokio::time::timeout(timeout, client.send_bytes_tagged_best_effort(dest, t, data)).await
@@ -99,6 +143,9 @@ pub(crate) async fn collective_send(
 }
 
 /// Receive bytes from a peer with tag-based routing and timeout.
+///
+/// For sparse topologies, receives from relay delivery channels when
+/// `src` is not a direct neighbor.
 pub(crate) async fn collective_recv(
     client: &NexarClient,
     src: Rank,
@@ -106,6 +153,27 @@ pub(crate) async fn collective_recv(
     tag: CollectiveTag,
 ) -> Result<PooledBuf> {
     let timeout = collective_timeout(client);
+
+    // Sparse topology relay path: if src is not a direct peer, receive via relay.
+    if !client.has_direct_peer(src)
+        && let (Some(deliveries), Some(t)) = (&client.relay_deliveries, tag)
+    {
+        let result = tokio::time::timeout(timeout, deliveries.recv_tagged(src, t)).await;
+        return match result {
+            Ok(Ok(buf)) => Ok(buf),
+            Ok(Err(e)) => Err(NexarError::CollectiveFailed {
+                operation,
+                rank: src,
+                reason: e.to_string(),
+            }),
+            Err(_) => Err(NexarError::CollectiveFailed {
+                operation,
+                rank: src,
+                reason: format!("relay recv timed out after {}s", timeout.as_secs()),
+            }),
+        };
+    }
+
     let result = match tag {
         Some(t) => {
             tokio::time::timeout(timeout, client.recv_bytes_tagged_best_effort(src, t, 0)).await
