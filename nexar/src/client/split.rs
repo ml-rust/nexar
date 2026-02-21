@@ -8,6 +8,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::NexarClient;
 use super::async_client::RawRecvSource;
+use super::hash::fnv1a_comm_id;
 
 impl NexarClient {
     /// Split this communicator into sub-groups.
@@ -111,24 +112,11 @@ impl NexarClient {
         // (split is collective). Combine parent comm_id, generation, and color
         // to produce a unique comm_id per split group.
         let split_gen = self.split_generation.fetch_add(1, Ordering::Relaxed);
-        let new_comm_id = {
-            // Hash (parent_comm_id, generation, color) via FNV-1a to produce a non-zero u64.
-            let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-            for b in self.comm_id.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in split_gen.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in my_color.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            // Ensure non-zero (0 is reserved for root comm).
-            if h == 0 { 1 } else { h }
-        };
+        let new_comm_id = fnv1a_comm_id([
+            &self.comm_id.to_le_bytes()[..],
+            &split_gen.to_le_bytes(),
+            &my_color.to_le_bytes(),
+        ]);
 
         // Step 5: Build rank_map (new_rank -> original_rank) and peer subset.
         let mut rank_map = HashMap::new();

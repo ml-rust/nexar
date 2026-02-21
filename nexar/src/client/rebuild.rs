@@ -1,3 +1,4 @@
+use crate::cluster::sparse::recompute_routing_table;
 use crate::error::{NexarError, Result};
 use crate::rpc::registry::RpcRegistry;
 use crate::types::Rank;
@@ -8,6 +9,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::NexarClient;
 use super::async_client::RawRecvSource;
+use super::hash::fnv1a_comm_id;
 
 impl NexarClient {
     /// Rebuild the communicator excluding dead ranks.
@@ -21,6 +23,9 @@ impl NexarClient {
     ///
     /// The new client shares the parent's QUIC connections and routers. It uses
     /// per-comm_id raw channels so its collectives don't interfere with the parent.
+    ///
+    /// For sparse topologies, the parent's relay infrastructure is inherited so
+    /// non-neighbor communication continues to work via relays.
     pub async fn rebuild_excluding(&self, dead_ranks: &[Rank]) -> Result<NexarClient> {
         debug_assert!(
             !dead_ranks.contains(&self.rank),
@@ -52,22 +57,14 @@ impl NexarClient {
 
         let rebuild_gen = self.split_generation.fetch_add(1, Ordering::Relaxed);
         let new_comm_id = {
-            let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-            for b in self.comm_id.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in rebuild_gen.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
+            let mut parts: Vec<Vec<u8>> = vec![
+                self.comm_id.to_le_bytes().to_vec(),
+                rebuild_gen.to_le_bytes().to_vec(),
+            ];
             for &dr in &sorted_dead {
-                for b in dr.to_le_bytes() {
-                    h ^= b as u64;
-                    h = h.wrapping_mul(0x100000001b3);
-                }
+                parts.push(dr.to_le_bytes().to_vec());
             }
-            if h == 0 { 1 } else { h }
+            fnv1a_comm_id(&parts)
         };
 
         // Build rank_map and peer subset.
@@ -80,12 +77,15 @@ impl NexarClient {
             rank_map.insert(new_r, orig_rank);
 
             if orig_rank != self.rank {
-                let peer = self.peer(orig_rank)?;
-                new_peers.insert(new_r, Arc::clone(peer));
+                // Only add peers we have direct connections to (in sparse topology,
+                // not all survivors are neighbors).
+                if let Some(peer) = self.peers.get(&orig_rank) {
+                    new_peers.insert(new_r, Arc::clone(peer));
 
-                if let Some(router) = self.routers.get(&orig_rank) {
-                    let rx = router.register_comm(new_comm_id).await;
-                    comm_receivers.insert(new_r, Mutex::new(rx));
+                    if let Some(router) = self.routers.get(&orig_rank) {
+                        let rx = router.register_comm(new_comm_id).await;
+                        comm_receivers.insert(new_r, Mutex::new(rx));
+                    }
                 }
             }
         }
@@ -111,7 +111,9 @@ impl NexarClient {
             failure_tx: Arc::clone(&self.failure_tx),
             failure_rx: self.failure_rx.clone(),
             _monitor_handle: None,
-            routing_table: self.routing_table.clone(),
+            routing_table: recompute_routing_table(&self.config.topology, new_rank, new_world_size),
+            // Inherit parent's relay infrastructure for sparse topologies.
+            // The parent's relay listeners are still running and deliver to these channels.
             relay_deliveries: self.relay_deliveries.clone(),
             _relay_handles: Vec::new(),
             _endpoints: Vec::new(),

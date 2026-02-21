@@ -5,6 +5,7 @@ mod byte_transport;
 mod collectives;
 mod collectives_nb;
 mod elastic;
+mod hash;
 mod messaging;
 mod rebuild;
 mod split;
