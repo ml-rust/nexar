@@ -100,6 +100,8 @@ pub(crate) async fn collective_send(
                 client.rank(),
                 &client.peers,
                 rt,
+                &client.config.topology,
+                client.world_size(),
                 dest,
                 t,
                 data,

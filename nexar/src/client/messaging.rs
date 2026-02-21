@@ -193,6 +193,8 @@ impl NexarClient {
                 self.rank,
                 &self.peers,
                 rt,
+                &self.config.topology,
+                self.world_size,
                 dest,
                 msg,
                 priority,
@@ -206,9 +208,8 @@ impl NexarClient {
     /// Receive a control message from any rank, using relay delivery if needed.
     pub(crate) async fn recv_control_from(&self, src: Rank) -> Result<NexarMessage> {
         let original_src = self.resolve_rank(src);
-        if self.routers.contains_key(&original_src) {
+        if let Some(router) = self.routers.get(&original_src) {
             // Direct peer: use router.
-            let router = self.routers.get(&original_src).unwrap();
             router.recv_control(original_src).await
         } else if let Some(ref deliveries) = self.relay_deliveries {
             // Non-neighbor: receive via relay.
@@ -242,6 +243,8 @@ impl NexarClient {
             self.rank,
             peers_arc,
             routing_table,
+            self.config.topology.clone(),
+            self.world_size,
             relay_receivers,
             deliveries,
             Arc::clone(&self._pool),
