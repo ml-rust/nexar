@@ -3,6 +3,7 @@
 //! All values have sensible defaults. Override via environment variables
 //! (prefixed `NEXAR_`) or by constructing a custom `NexarConfig`.
 
+use crate::cluster::recovery::RecoveryPolicy;
 use crate::cluster::sparse::TopologyStrategy;
 use std::time::Duration;
 
@@ -81,6 +82,9 @@ pub struct NexarConfig {
 
     /// Timeout for the elastic checkpoint protocol.
     pub elastic_checkpoint_timeout: Duration,
+
+    /// Policy for handling detected node failures.
+    pub recovery_policy: RecoveryPolicy,
 }
 
 impl Default for NexarConfig {
@@ -103,6 +107,7 @@ impl Default for NexarConfig {
             elastic_min_world_size: 1,
             elastic_max_world_size: 0,
             elastic_checkpoint_timeout: Duration::from_secs(60),
+            recovery_policy: RecoveryPolicy::Automatic,
         }
     }
 }
@@ -123,6 +128,7 @@ impl NexarConfig {
     /// - `NEXAR_HEARTBEAT_INTERVAL_SECS` (default: 1)
     /// - `NEXAR_HEARTBEAT_TIMEOUT_SECS` (default: 5)
     /// - `NEXAR_RECOVERY_TIMEOUT_SECS` (default: 30)
+    /// - `NEXAR_RECOVERY_POLICY` (default: "automatic", options: "automatic"/"auto", "manual", "abort")
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
 
@@ -207,6 +213,15 @@ impl NexarConfig {
             && let Ok(s) = v.parse::<u64>()
         {
             cfg.elastic_checkpoint_timeout = Duration::from_secs(s);
+        }
+
+        if let Ok(v) = std::env::var("NEXAR_RECOVERY_POLICY") {
+            match v.to_lowercase().as_str() {
+                "automatic" | "auto" => cfg.recovery_policy = RecoveryPolicy::Automatic,
+                "manual" => cfg.recovery_policy = RecoveryPolicy::Manual,
+                "abort" => cfg.recovery_policy = RecoveryPolicy::Abort,
+                _ => {}
+            }
         }
 
         cfg

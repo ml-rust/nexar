@@ -69,6 +69,12 @@ impl RecoveryOrchestrator {
         (orchestrator, event_rx)
     }
 
+    /// Create a new orchestrator using the recovery policy from the client's config.
+    pub fn from_config(client: NexarClient) -> (Self, broadcast::Receiver<RecoveryEvent>) {
+        let policy = client.config.recovery_policy;
+        Self::new(client, policy)
+    }
+
     /// Subscribe to recovery events.
     pub fn subscribe(&self) -> broadcast::Receiver<RecoveryEvent> {
         self.event_tx.subscribe()
