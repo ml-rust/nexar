@@ -8,6 +8,8 @@ use crate::cluster::seed::PendingJoin;
 use crate::config::NexarConfig;
 use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
+use crate::transport::tls::make_client_config_mtls;
+use crate::transport::{PeerConnection, TransportListener};
 use crate::types::{Priority, Rank};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -71,6 +73,8 @@ pub struct ElasticManager {
     my_key: Vec<u8>,
     /// Seed address for add_nodes testing helper.
     seed_addr: Option<SocketAddr>,
+    /// Listeners for newly joined workers (kept alive so peers can connect).
+    new_worker_listeners: Arc<StdMutex<Vec<(Rank, TransportListener)>>>,
 }
 
 impl Clone for ElasticManager {
@@ -87,6 +91,7 @@ impl Clone for ElasticManager {
             my_cert: self.my_cert.clone(),
             my_key: self.my_key.clone(),
             seed_addr: self.seed_addr,
+            new_worker_listeners: Arc::clone(&self.new_worker_listeners),
         }
     }
 }
@@ -117,6 +122,7 @@ impl ElasticManager {
             my_cert,
             my_key,
             seed_addr,
+            new_worker_listeners: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
@@ -289,21 +295,57 @@ impl ElasticManager {
         let mut client = self.client.lock().await;
 
         if !joined.is_empty() {
-            let new_peers: Vec<(Rank, Arc<crate::transport::PeerConnection>)> = Vec::new();
-            // Note: In a full mesh scenario the joining nodes must first establish
-            // P2P connections to all existing peers. For local bootstrap testing,
-            // rebuild_adding creates the logical client with an expanded world size.
-            // Real peer connections from the joining nodes will be wired in by the
-            // bootstrap layer or by the join handshake that precedes the checkpoint.
-            let rebuilt = client.rebuild_adding(new_peers).await;
-            match rebuilt {
-                Ok(new_client) => *client = new_client,
-                Err(e) => {
-                    tracing::warn!("rebuild_adding failed (no new peer connections): {e}");
-                    // Even without new peer connections, update the event.
-                    // The caller will see the joined ranks and can wire connections.
+            let ca_der = rustls::pki_types::CertificateDer::from(self.ca_cert.clone());
+            let my_cert_der = rustls::pki_types::CertificateDer::from(self.my_cert.clone());
+            let my_key_der = rustls::pki_types::PrivateKeyDer::try_from(self.my_key.clone())
+                .map_err(|e| NexarError::Tls(format!("parse private key for mesh connect: {e}")))?;
+            let client_config = make_client_config_mtls(my_cert_der, my_key_der, &ca_der)?;
+
+            let mut new_peers: Vec<(Rank, Arc<PeerConnection>)> = Vec::new();
+
+            for &(new_rank, ref addr_str) in joined {
+                let addr: SocketAddr = addr_str.parse().map_err(|e| {
+                    NexarError::Elastic(format!(
+                        "invalid listen address '{addr_str}' for rank {new_rank}: {e}"
+                    ))
+                })?;
+
+                let bind_addr: SocketAddr = if addr.is_ipv4() {
+                    "127.0.0.1:0"
+                } else {
+                    "[::1]:0"
                 }
+                .parse()
+                .expect("hardcoded socket addr");
+
+                let mut endpoint = quinn::Endpoint::client(bind_addr).map_err(|e| {
+                    NexarError::transport_with_source("bind client for new peer", e)
+                })?;
+                endpoint.set_default_client_config(client_config.clone());
+
+                let conn = endpoint
+                    .connect(addr, "localhost")
+                    .map_err(|e| {
+                        NexarError::transport_with_source(
+                            format!("connect to new rank {new_rank}"),
+                            e,
+                        )
+                    })?
+                    .await
+                    .map_err(|e| {
+                        NexarError::transport_with_source(
+                            format!("handshake with new rank {new_rank}"),
+                            e,
+                        )
+                    })?;
+
+                let peer = Arc::new(PeerConnection::new(new_rank, conn));
+                peer.warm_stream_pool().await;
+                new_peers.push((new_rank, peer));
             }
+
+            let rebuilt = client.rebuild_adding(new_peers).await?;
+            *client = rebuilt;
         }
 
         if !left.is_empty() {
@@ -342,15 +384,41 @@ impl ElasticManager {
 
         for _ in 0..count {
             let worker = crate::cluster::WorkerNode::connect(seed_addr).await?;
+
+            // Bind a mTLS listener so existing peers can connect to this new node.
+            let ca_der = rustls::pki_types::CertificateDer::from(worker.ca_cert.clone());
+            let cert_der = rustls::pki_types::CertificateDer::from(worker.node_cert.clone());
+            let key_der = rustls::pki_types::PrivateKeyDer::try_from(worker.node_key.clone())
+                .map_err(|e| NexarError::Tls(format!("parse new node private key: {e}")))?;
+
+            let bind_addr: SocketAddr = if seed_addr.is_ipv4() {
+                "127.0.0.1:0"
+            } else {
+                "[::1]:0"
+            }
+            .parse()
+            .expect("hardcoded socket addr");
+
+            let listener =
+                TransportListener::bind_with_mtls(bind_addr, cert_der, key_der, &ca_der)?;
+            let listen_addr = listener.local_addr().to_string();
+
             let pj = PendingJoin {
                 rank: worker.rank,
-                listen_addr: String::new(),
+                listen_addr,
             };
             new_joins.push(pj.clone());
             self.pending_joins
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .push(pj);
+
+            // Keep the listener alive so peers can connect during apply_resize.
+            let mut listeners = self
+                .new_worker_listeners
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            listeners.push((worker.rank, listener));
         }
 
         Ok(new_joins)
