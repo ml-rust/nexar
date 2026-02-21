@@ -42,7 +42,7 @@ async fn two_phase_barrier(client: &NexarClient, timeout: Duration) -> Result<()
     if rank == 0 {
         // Rank 0: collect barriers from all other ranks.
         for r in 1..world {
-            let msg = tokio::time::timeout(timeout, client.recv_control(r))
+            let msg = tokio::time::timeout(timeout, client.recv_control_from(r))
                 .await
                 .map_err(|_| NexarError::CollectiveFailed {
                     operation: "barrier",
@@ -79,8 +79,7 @@ async fn two_phase_barrier(client: &NexarClient, timeout: Duration) -> Result<()
         let ack = NexarMessage::BarrierAck { epoch, comm_id };
         for r in 1..world {
             client
-                .peer(r)?
-                .send_message(&ack, Priority::Critical)
+                .send_message_to(r, &ack, Priority::Critical)
                 .await
                 .map_err(|e| NexarError::CollectiveFailed {
                     operation: "barrier",
@@ -92,8 +91,7 @@ async fn two_phase_barrier(client: &NexarClient, timeout: Duration) -> Result<()
         // Non-zero rank: send Barrier to rank 0, wait for BarrierAck.
         let barrier_msg = NexarMessage::Barrier { epoch, comm_id };
         client
-            .peer(0)?
-            .send_message(&barrier_msg, Priority::Critical)
+            .send_message_to(0, &barrier_msg, Priority::Critical)
             .await
             .map_err(|e| NexarError::CollectiveFailed {
                 operation: "barrier",
@@ -101,7 +99,7 @@ async fn two_phase_barrier(client: &NexarClient, timeout: Duration) -> Result<()
                 reason: e.to_string(),
             })?;
 
-        let ack = tokio::time::timeout(timeout, client.recv_control(0))
+        let ack = tokio::time::timeout(timeout, client.recv_control_from(0))
             .await
             .map_err(|_| NexarError::CollectiveFailed {
                 operation: "barrier",
@@ -166,8 +164,7 @@ async fn dissemination_barrier(client: &NexarClient, timeout: Duration) -> Resul
         // Send and receive concurrently.
         let send_fut = async {
             client
-                .peer(send_to)?
-                .send_message(&msg, Priority::Critical)
+                .send_message_to(send_to, &msg, Priority::Critical)
                 .await
                 .map_err(|e| NexarError::CollectiveFailed {
                     operation: "barrier",
@@ -177,7 +174,7 @@ async fn dissemination_barrier(client: &NexarClient, timeout: Duration) -> Resul
         };
 
         let recv_fut = async {
-            let received = tokio::time::timeout(timeout, client.recv_control(recv_from))
+            let received = tokio::time::timeout(timeout, client.recv_control_from(recv_from))
                 .await
                 .map_err(|_| NexarError::CollectiveFailed {
                     operation: "barrier",
