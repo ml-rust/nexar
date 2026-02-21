@@ -14,6 +14,9 @@ pub enum NexarMessage {
         /// Pre-shared cluster token for bootstrap authentication.
         /// Empty = no authentication required.
         cluster_token: Vec<u8>,
+        /// Mesh listener address advertised by this node.
+        /// Empty string means seed should use `conn.remote_address()` as fallback.
+        listen_addr: String,
     },
 
     /// Seed's response with rank assignment, peer list, and mTLS credentials.
@@ -83,6 +86,20 @@ pub enum NexarMessage {
 
     /// Recovery agreement: the leader broadcasts the agreed dead set to all survivors.
     RecoveryAgreement { epoch: u64, dead_ranks: Vec<Rank> },
+
+    /// Elastic checkpoint: this rank is at a safe point for resize.
+    /// New nodes send this to rank 0 after connecting to all existing peers.
+    /// Existing nodes send this when the training loop calls elastic_checkpoint().
+    ElasticCheckpoint { epoch: u64 },
+
+    /// Elastic checkpoint ack: sent by rank 0 when all ranks (old + new) checked in.
+    /// Contains the full delta: who's joining, who's leaving, new world size.
+    ElasticCheckpointAck {
+        epoch: u64,
+        joining: Vec<(Rank, String)>,
+        leaving: Vec<Rank>,
+        new_world_size: u32,
+    },
 }
 
 #[cfg(test)]
@@ -95,6 +112,7 @@ mod tests {
             protocol_version: 1,
             capabilities: 0xFF,
             cluster_token: vec![],
+            listen_addr: String::new(),
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
         let deserialized: NexarMessage =
@@ -125,6 +143,7 @@ mod tests {
                 protocol_version: 1,
                 capabilities: 0,
                 cluster_token: vec![],
+                listen_addr: String::new(),
             },
             NexarMessage::Welcome {
                 rank: 0,
@@ -178,6 +197,13 @@ mod tests {
             NexarMessage::RecoveryAgreement {
                 epoch: 1,
                 dead_ranks: vec![2, 3],
+            },
+            NexarMessage::ElasticCheckpoint { epoch: 5 },
+            NexarMessage::ElasticCheckpointAck {
+                epoch: 5,
+                joining: vec![(4, "127.0.0.1:9000".into())],
+                leaving: vec![2],
+                new_world_size: 4,
             },
         ];
 

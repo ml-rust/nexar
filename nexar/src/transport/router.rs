@@ -370,7 +370,9 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) -> Result<()> {
         | NexarMessage::RdmaEndpoint { .. }
         | NexarMessage::SplitRequest { .. }
         | NexarMessage::RecoveryVote { .. }
-        | NexarMessage::RecoveryAgreement { .. } => {
+        | NexarMessage::RecoveryAgreement { .. }
+        | NexarMessage::ElasticCheckpoint { .. }
+        | NexarMessage::ElasticCheckpointAck { .. } => {
             if tx.control.send(msg).await.is_err() {
                 return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }

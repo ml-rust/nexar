@@ -96,6 +96,12 @@ pub enum NexarError {
         dead_ranks: Vec<Rank>,
         message: String,
     },
+
+    #[error("elastic checkpoint timed out after {timeout_ms}ms (epoch {epoch})")]
+    ElasticTimeout { epoch: u64, timeout_ms: u64 },
+
+    #[error("elastic scaling error: {0}")]
+    Elastic(String),
 }
 
 impl NexarError {
@@ -240,6 +246,11 @@ mod tests {
                 dead_ranks: vec![2],
                 message: "test".into(),
             },
+            NexarError::ElasticTimeout {
+                epoch: 1,
+                timeout_ms: 60000,
+            },
+            NexarError::Elastic("max world size exceeded".into()),
         ];
         for e in &errors {
             assert!(!e.to_string().is_empty(), "empty display for {e:?}");

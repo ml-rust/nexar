@@ -71,6 +71,7 @@ mod tests {
             protocol_version: 1,
             capabilities: 0xABCD,
             cluster_token: vec![],
+            listen_addr: String::new(),
         };
         let buf = encode_message(&msg, Priority::Critical).unwrap();
         let (header, decoded) = decode_message(&buf).unwrap();

@@ -3,6 +3,7 @@ mod bootstrap;
 mod byte_transport;
 mod collectives;
 mod collectives_nb;
+mod elastic;
 mod rebuild;
 mod split;
 mod sync_client;

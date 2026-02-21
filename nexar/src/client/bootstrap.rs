@@ -1,5 +1,8 @@
 use crate::client::NexarClient;
+use crate::cluster::PendingJoin;
+use crate::cluster::elastic::{ElasticBootstrap, ElasticConfig, ElasticManager};
 use crate::cluster::{SeedNode, WorkerNode};
+use crate::config::NexarConfig;
 use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
 use crate::transport::PeerConnection;
@@ -35,7 +38,7 @@ impl NexarClient {
             worker_handles.push(tokio::spawn(WorkerNode::connect(seed_addr)));
         }
 
-        let (_map, _seed_conns) = seed_handle
+        let _seed_result = seed_handle
             .await
             .map_err(|e| NexarError::transport_with_source("seed task panicked", e))??;
 
@@ -67,7 +70,7 @@ impl NexarClient {
             worker_handles.push(tokio::spawn(WorkerNode::connect(seed_addr)));
         }
 
-        let (_map, _seed_conns) = seed_handle
+        let _seed_result = seed_handle
             .await
             .map_err(|e| NexarError::transport_with_source("seed task panicked", e))??;
 
@@ -80,6 +83,88 @@ impl NexarClient {
         }
 
         build_mesh_with_config(workers, adapter, config).await
+    }
+
+    /// Bootstrap a cluster with elastic scaling support.
+    ///
+    /// Creates an initial cluster of `initial_world` nodes, wraps each in an
+    /// `ElasticManager`, and starts a background loop on the seed to accept
+    /// new join requests.
+    pub async fn bootstrap_elastic(
+        initial_world: u32,
+        elastic_config: ElasticConfig,
+        nexar_config: NexarConfig,
+        adapter: Arc<dyn DeviceAdapter>,
+    ) -> Result<ElasticBootstrap> {
+        let seed_addr: SocketAddr = "127.0.0.1:0".parse().expect("hardcoded socket addr");
+        let seed = SeedNode::bind_local(seed_addr, initial_world)?;
+        let seed_addr = seed.local_addr();
+
+        // We need the seed to stay alive for accept_elastic, so use Arc.
+        let seed = Arc::new(seed);
+        let seed_for_formation = Arc::clone(&seed);
+        let seed_handle = tokio::spawn(async move { seed_for_formation.form_cluster().await });
+
+        let mut worker_handles = Vec::new();
+        for _ in 0..initial_world {
+            worker_handles.push(tokio::spawn(WorkerNode::connect(seed_addr)));
+        }
+
+        let seed_result = seed_handle
+            .await
+            .map_err(|e| NexarError::transport_with_source("seed task panicked", e))??;
+
+        let mut workers: Vec<WorkerNode> = Vec::new();
+        for h in worker_handles {
+            workers.push(
+                h.await
+                    .map_err(|e| NexarError::transport_with_source("worker task panicked", e))??,
+            );
+        }
+
+        // Save credentials before building mesh (we need them for ElasticManager).
+        let creds: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = workers
+            .iter()
+            .map(|w| (w.ca_cert.clone(), w.node_cert.clone(), w.node_key.clone()))
+            .collect();
+
+        let clients = build_mesh_with_config(workers, adapter, nexar_config.clone()).await?;
+
+        // Shared pending joins buffer (seed's accept_elastic loop writes here).
+        let pending_joins = Arc::new(std::sync::Mutex::new(Vec::<PendingJoin>::new()));
+
+        // Start the seed's elastic accept loop in the background.
+        let ca = Arc::new(seed_result.ca);
+        let next_rank = Arc::new(std::sync::atomic::AtomicU32::new(seed_result.next_rank));
+        let cluster_map = Arc::new(std::sync::Mutex::new(seed_result.map));
+        let max_world = elastic_config.max_world_size;
+
+        let pj = Arc::clone(&pending_joins);
+        let ca2 = Arc::clone(&ca);
+        let nr = Arc::clone(&next_rank);
+        let cm = Arc::clone(&cluster_map);
+        tokio::spawn(async move {
+            let _ = seed.accept_elastic(ca2, nr, max_world, pj, cm).await;
+        });
+
+        let mut managers = Vec::new();
+        for (client, (ca_cert, node_cert, node_key)) in clients.into_iter().zip(creds) {
+            managers.push(ElasticManager::new(
+                client,
+                elastic_config.clone(),
+                nexar_config.clone(),
+                ca_cert,
+                node_cert,
+                node_key,
+                Arc::clone(&pending_joins),
+                Some(seed_addr),
+            ));
+        }
+
+        Ok(ElasticBootstrap {
+            managers,
+            seed_addr,
+        })
     }
 }
 

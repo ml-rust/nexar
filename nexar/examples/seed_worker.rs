@@ -34,7 +34,7 @@ async fn main() -> nexar::Result<()> {
     }
 
     // Wait for cluster formation.
-    let (_cluster_map, _seed_conns) = seed_handle.await.unwrap()?;
+    let _seed_result = seed_handle.await.unwrap()?;
 
     let mut worker_nodes = Vec::new();
     for w in workers {

@@ -65,6 +65,18 @@ pub struct NexarConfig {
 
     /// Timeout for the recovery agreement protocol (vote collection + rebuild).
     pub recovery_timeout: Duration,
+
+    /// Enable elastic scaling (dynamic grow/shrink).
+    pub elastic_enabled: bool,
+
+    /// Minimum world size for elastic scaling (won't shrink below this).
+    pub elastic_min_world_size: u32,
+
+    /// Maximum world size for elastic scaling (0 = unlimited).
+    pub elastic_max_world_size: u32,
+
+    /// Timeout for the elastic checkpoint protocol.
+    pub elastic_checkpoint_timeout: Duration,
 }
 
 impl Default for NexarConfig {
@@ -82,6 +94,10 @@ impl Default for NexarConfig {
             heartbeat_interval: Duration::from_secs(1),
             heartbeat_timeout: Duration::from_secs(5),
             recovery_timeout: Duration::from_secs(30),
+            elastic_enabled: false,
+            elastic_min_world_size: 1,
+            elastic_max_world_size: 0,
+            elastic_checkpoint_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -161,6 +177,25 @@ impl NexarConfig {
             && let Ok(s) = v.parse::<u64>()
         {
             cfg.recovery_timeout = Duration::from_secs(s);
+        }
+
+        if let Ok(v) = std::env::var("NEXAR_ELASTIC_ENABLED") {
+            cfg.elastic_enabled = v != "0" && v.to_lowercase() != "false";
+        }
+        if let Ok(v) = std::env::var("NEXAR_ELASTIC_MIN_WORLD_SIZE")
+            && let Ok(n) = v.parse::<u32>()
+        {
+            cfg.elastic_min_world_size = n;
+        }
+        if let Ok(v) = std::env::var("NEXAR_ELASTIC_MAX_WORLD_SIZE")
+            && let Ok(n) = v.parse::<u32>()
+        {
+            cfg.elastic_max_world_size = n;
+        }
+        if let Ok(v) = std::env::var("NEXAR_ELASTIC_CHECKPOINT_TIMEOUT_SECS")
+            && let Ok(s) = v.parse::<u64>()
+        {
+            cfg.elastic_checkpoint_timeout = Duration::from_secs(s);
         }
 
         cfg

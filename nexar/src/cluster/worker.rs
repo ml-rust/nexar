@@ -61,6 +61,7 @@ impl WorkerNode {
             protocol_version: PROTOCOL_VERSION,
             capabilities: 0,
             cluster_token,
+            listen_addr: String::new(),
         };
         let buf = encode_message(&hello, Priority::Critical)?;
         send.write_all(&buf)
@@ -162,8 +163,8 @@ mod tests {
         let (seed_result, worker_result) =
             tokio::join!(seed.form_cluster(), WorkerNode::connect(seed_addr),);
 
-        let (_map, conns) = seed_result.unwrap();
-        assert_eq!(conns.len(), 1);
+        let result = seed_result.unwrap();
+        assert_eq!(result.connections.len(), 1);
 
         let worker = worker_result.unwrap();
         assert_eq!(worker.rank, 0);
@@ -188,8 +189,8 @@ mod tests {
 
         let (seed_result, w1_result, w2_result) = tokio::join!(seed_handle, w1, w2);
 
-        let (_map, conns) = seed_result.unwrap().unwrap();
-        assert_eq!(conns.len(), 2);
+        let result = seed_result.unwrap().unwrap();
+        assert_eq!(result.connections.len(), 2);
 
         let w1 = w1_result.unwrap().unwrap();
         let w2 = w2_result.unwrap().unwrap();
@@ -219,8 +220,8 @@ mod tests {
             handles.push(tokio::spawn(WorkerNode::connect(seed_addr)));
         }
 
-        let (_map, conns) = seed_handle.await.unwrap().unwrap();
-        assert_eq!(conns.len(), 4);
+        let result = seed_handle.await.unwrap().unwrap();
+        assert_eq!(result.connections.len(), 4);
 
         let mut ranks = Vec::new();
         for h in handles {
