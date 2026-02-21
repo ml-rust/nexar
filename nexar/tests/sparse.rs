@@ -314,3 +314,97 @@ async fn test_ring_7nodes_no_tcp() {
     // Odd count, QUIC-only (no TCP sidecar): regression for connection swapping bug.
     run_allreduce_test(7, Some(no_tcp_config(8))).await;
 }
+
+// --- Sparse topology + reduce-scatter tests ---
+
+#[tokio::test]
+async fn test_kregular_reduce_scatter() {
+    // 16 nodes, KRegular{6}: reduce-scatter via relay routing.
+    let adapter = Arc::new(CpuAdapter::new());
+    let clients = NexarClient::bootstrap_local_with_config(16, adapter, kregular_config(6))
+        .await
+        .unwrap();
+
+    let clients: Vec<Arc<NexarClient>> = clients.into_iter().map(Arc::new).collect();
+    let world = 16usize;
+    let count_per_rank = 4usize;
+    let total = count_per_rank * world;
+
+    let mut handles = Vec::new();
+    for client in &clients {
+        let client = Arc::clone(client);
+        handles.push(tokio::spawn(async move {
+            let rank = client.rank() as usize;
+            // Each rank fills send buffer with (rank+1) at every position.
+            let val = (rank as f32) + 1.0;
+            let mut send_buf = vec![val; total];
+            let mut recv_buf = vec![0.0f32; count_per_rank];
+            let send_ptr = send_buf.as_mut_ptr() as u64;
+            let recv_ptr = recv_buf.as_mut_ptr() as u64;
+            unsafe {
+                client
+                    .reduce_scatter(
+                        send_ptr,
+                        recv_ptr,
+                        count_per_rank,
+                        DataType::F32,
+                        ReduceOp::Sum,
+                    )
+                    .await
+                    .unwrap();
+            }
+            recv_buf
+        }));
+    }
+
+    let expected_sum: f32 = (0..world).map(|r| r as f32 + 1.0).sum();
+    for handle in handles {
+        let result = handle.await.unwrap();
+        for &v in &result {
+            assert!(
+                (v - expected_sum).abs() < 1e-3,
+                "expected {expected_sum}, got {v}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_hypercube_broadcast() {
+    // 8 nodes, Hypercube: broadcast from root=3 reaches all ranks.
+    let adapter = Arc::new(CpuAdapter::new());
+    let clients = NexarClient::bootstrap_local_with_config(8, adapter, hypercube_config())
+        .await
+        .unwrap();
+
+    let clients: Vec<Arc<NexarClient>> = clients.into_iter().map(Arc::new).collect();
+    let root = 3u32;
+
+    let mut handles = Vec::new();
+    for client in &clients {
+        let client = Arc::clone(client);
+        handles.push(tokio::spawn(async move {
+            let count = 8usize;
+            let mut data: Vec<f32> = if client.rank() == root {
+                vec![99.5; count]
+            } else {
+                vec![0.0; count]
+            };
+            let ptr = data.as_mut_ptr() as u64;
+            unsafe {
+                client
+                    .broadcast(ptr, count, DataType::F32, root)
+                    .await
+                    .unwrap();
+            }
+            data
+        }));
+    }
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        for &v in &result {
+            assert!((v - 99.5).abs() < 1e-6, "expected 99.5, got {v}");
+        }
+    }
+}
