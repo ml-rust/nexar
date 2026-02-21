@@ -37,6 +37,22 @@ nexar takes a different approach:
 - `scan` / `exclusive_scan` — inclusive/exclusive prefix scan
 - `barrier` — distributed synchronization (two-phase for small clusters, dissemination for larger)
 
+**Elastic membership:**
+
+- `rebuild_adding` / `rebuild_excluding` — grow or shrink the communicator at runtime without restarting the job.
+
+**Fault recovery:**
+
+- Automatic, manual, or abort policies when nodes die. Healthy nodes agree on the failure set and rebuild the communicator.
+
+**Sparse topologies:**
+
+- `FullMesh`, `KRegular`, `Hypercube` strategies with automatic relay routing for non-neighbors. At scale, O(N²) connections don't work — KRegular gives O(K·N).
+
+**Non-blocking collectives:**
+
+- `all_reduce_nb`, `broadcast_nb`, etc. — return a `CollectiveHandle` you can await later. Overlap computation with communication.
+
 **RPC:**
 
 - Register handlers by function ID, call them by rank. Responses are matched per-request, so concurrent RPCs don't interfere.
@@ -90,14 +106,14 @@ async fn main() -> nexar::Result<()> {
 
 Runnable examples in [`nexar/examples/`](nexar/examples/):
 
-| Example                                            | What it shows                                                         |
-| -------------------------------------------------- | --------------------------------------------------------------------- |
-| [`send_recv`](nexar/examples/send_recv.rs)         | Point-to-point tagged send/recv between two ranks                     |
-| [`allreduce`](nexar/examples/allreduce.rs)         | Ring-allreduce (Sum) across 4 ranks                                   |
-| [`broadcast`](nexar/examples/broadcast.rs)         | Tree broadcast from root to all ranks                                 |
-| [`barrier`](nexar/examples/barrier.rs)             | Barrier synchronization with staggered arrivals                       |
-| [`rpc`](nexar/examples/rpc.rs)                     | Register a remote function, call it across ranks                      |
-| [`seed_worker`](nexar/examples/seed_worker.rs)     | Manual cluster setup with seed/worker nodes (real deployment pattern) |
+| Example                                        | What it shows                                                         |
+| ---------------------------------------------- | --------------------------------------------------------------------- |
+| [`send_recv`](nexar/examples/send_recv.rs)     | Point-to-point tagged send/recv between two ranks                     |
+| [`allreduce`](nexar/examples/allreduce.rs)     | Ring-allreduce (Sum) across 4 ranks                                   |
+| [`broadcast`](nexar/examples/broadcast.rs)     | Tree broadcast from root to all ranks                                 |
+| [`barrier`](nexar/examples/barrier.rs)         | Barrier synchronization with staggered arrivals                       |
+| [`rpc`](nexar/examples/rpc.rs)                 | Register a remote function, call it across ranks                      |
+| [`seed_worker`](nexar/examples/seed_worker.rs) | Manual cluster setup with seed/worker nodes (real deployment pattern) |
 
 Run any example with:
 
@@ -176,16 +192,16 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
-Requires Rust 1.85+.
+Requires Rust 1.89+.
 
 ## Workspace crates
 
-| Crate                      | What it provides                                                        | C dependencies              |
-| -------------------------- | ----------------------------------------------------------------------- | --------------------------- |
-| `nexar`                    | Core runtime: QUIC transport, collectives, RPC                          | None                        |
-| `nexar-rdma`               | RDMA transport extension (InfiniBand/RoCE kernel bypass)                | `libibverbs` (rdma-core)    |
-| `nexar-rdma` + `gpudirect` | GPU memory → RDMA NIC directly, `CudaAdapter`                           | `libibverbs` + CUDA runtime |
-| `nexar-nccl`               | Hierarchical communicator: NCCL intra-node + nexar inter-node           | CUDA runtime + NCCL         |
+| Crate                      | What it provides                                              | C dependencies              |
+| -------------------------- | ------------------------------------------------------------- | --------------------------- |
+| `nexar`                    | Core runtime: QUIC transport, collectives, RPC                | None                        |
+| `nexar-rdma`               | RDMA transport extension (InfiniBand/RoCE kernel bypass)      | `libibverbs` (rdma-core)    |
+| `nexar-rdma` + `gpudirect` | GPU memory → RDMA NIC directly, `CudaAdapter`                 | `libibverbs` + CUDA runtime |
+| `nexar-nccl`               | Hierarchical communicator: NCCL intra-node + nexar inter-node | CUDA runtime + NCCL         |
 
 ## License
 
