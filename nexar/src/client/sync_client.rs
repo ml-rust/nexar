@@ -218,6 +218,15 @@ impl SyncClient {
         self.rt.block_on(self.inner.barrier())
     }
 
+    /// Split this communicator by color and key, creating a sub-communicator.
+    ///
+    /// All ranks must call `split()` collectively. Ranks with the same `color`
+    /// end up in the same sub-communicator, ordered by `key`.
+    pub fn split(&self, color: u32, key: u32) -> Result<SyncClient> {
+        let inner = self.rt.block_on(self.inner.split(color, key))?;
+        SyncClient::from_async(inner)
+    }
+
     // ── Typed host buffer collectives ───────────────────────────────
 
     sync_typed! {
