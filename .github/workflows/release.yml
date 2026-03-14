@@ -23,7 +23,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -97,13 +97,13 @@ jobs:
           TIER2="nexar-rdma nexar-nccl"
 
           is_published() {
-            cargo search "$1" --limit 1 2>/dev/null | grep -q "^$1 = \"$2\""
+            curl -sf "https://crates.io/api/v1/crates/$1/$2" > /dev/null 2>&1
           }
 
           wait_for() {
             local crate="$1" version="$2"
             echo -n "  Waiting for $crate@$version..."
-            for i in $(seq 1 60); do
+            for i in $(seq 1 30); do
               if is_published "$crate" "$version"; then
                 echo " ready"
                 return 0
