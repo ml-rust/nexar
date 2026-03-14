@@ -97,7 +97,7 @@ jobs:
           TIER2="nexar-rdma nexar-nccl"
 
           is_published() {
-            cargo search "$1" --limit 1 2>/dev/null | grep -q "\"$2\""
+            cargo search "$1" --limit 1 2>/dev/null | grep -q "^$1 = \"$2\""
           }
 
           wait_for() {
