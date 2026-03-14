@@ -27,7 +27,7 @@ impl NexarClient {
         build_mesh(workers, adapter).await
     }
 
-    /// Like [`bootstrap_local`], but with a custom configuration.
+    /// Like [`NexarClient::bootstrap_local`], but with a custom configuration.
     pub async fn bootstrap_local_with_config(
         world_size: u32,
         adapter: Arc<dyn DeviceAdapter>,

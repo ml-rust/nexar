@@ -156,7 +156,7 @@ impl NexarClient {
     /// Create a client with a user-supplied buffer pool.
     ///
     /// Use this to share a single pool across multiple clients, or to pass
-    /// a pool built with [`PoolBuilder`] for custom tier sizing.
+    /// a pool built with [`crate::PoolBuilder`] for custom tier sizing.
     pub fn new_with_pool(
         rank: Rank,
         world_size: u32,

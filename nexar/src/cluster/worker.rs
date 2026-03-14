@@ -143,7 +143,7 @@ impl WorkerNode {
             reason: format!(
                 "failed to connect to seed after {} attempts: {}",
                 Self::MAX_RETRIES,
-                last_err.unwrap()
+                last_err.expect("MAX_RETRIES > 0 guarantees at least one attempt")
             ),
         })
     }
