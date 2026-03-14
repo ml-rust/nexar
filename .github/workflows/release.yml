@@ -97,7 +97,7 @@ jobs:
           TIER2="nexar-rdma nexar-nccl"
 
           is_published() {
-            curl -sf "https://crates.io/api/v1/crates/$1/$2" > /dev/null 2>&1
+            curl -sf -H "User-Agent: nexar-ci (github.com/ml-rust/nexar)" "https://crates.io/api/v1/crates/$1/$2" > /dev/null 2>&1
           }
 
           wait_for() {
