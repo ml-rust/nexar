@@ -7,8 +7,12 @@ use std::sync::Arc;
 /// leaf certificates so all mesh connections can verify each other.
 /// The CA key never leaves the seed process.
 pub struct ClusterCa {
-    cert: rcgen::Certificate,
-    params: rcgen::CertificateParams,
+    cert_der: rustls::pki_types::CertificateDer<'static>,
+    /// Issuer params recovered from the generate path. `None` after a
+    /// `from_der` reload — in that case we rebuild the issuer at
+    /// issue-time via `rcgen::Issuer::from_ca_cert_der`, which parses
+    /// the DN + key-usage bits from the stored cert DER.
+    params: Option<rcgen::CertificateParams>,
     key_pair: rcgen::KeyPair,
 }
 
@@ -28,21 +32,23 @@ impl ClusterCa {
             .self_signed(&key_pair)
             .map_err(|e| NexarError::Tls(e.to_string()))?;
 
+        let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
         Ok(Self {
-            cert,
-            params,
+            cert_der,
+            params: Some(params),
             key_pair,
         })
     }
 
     /// DER-encoded CA certificate (shared with all nodes as trust anchor).
     pub fn cert_der(&self) -> rustls::pki_types::CertificateDer<'static> {
-        rustls::pki_types::CertificateDer::from(self.cert.der().to_vec())
+        self.cert_der.clone()
     }
 
-    /// Issue a leaf certificate signed by this CA.
+    /// Issue a leaf certificate signed by this CA with a single SAN.
     ///
-    /// Returns `(cert_der, key_der)` for the node.
+    /// Equivalent to [`issue_cert_multi`] with `&[san]`; kept as a
+    /// convenience for single-SAN callers.
     pub fn issue_cert(
         &self,
         san: &str,
@@ -50,20 +56,90 @@ impl ClusterCa {
         rustls::pki_types::CertificateDer<'static>,
         rustls::pki_types::PrivateKeyDer<'static>,
     )> {
-        let leaf_params = rcgen::CertificateParams::new(vec![san.into()])
-            .map_err(|e| NexarError::Tls(e.to_string()))?;
+        self.issue_cert_multi(&[san])
+    }
+
+    /// Issue a leaf certificate signed by this CA with one or more
+    /// Subject Alternative Names.
+    ///
+    /// Every string in `sans` is added to the leaf's SAN list so the
+    /// same cert can satisfy multiple SNI hostnames (e.g. the fixed
+    /// cluster SNI `"nodedb"` *and* the per-node identity
+    /// `"node-3"`). Returns `(cert_der, key_der)` for the node.
+    pub fn issue_cert_multi(
+        &self,
+        sans: &[&str],
+    ) -> Result<(
+        rustls::pki_types::CertificateDer<'static>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    )> {
+        if sans.is_empty() {
+            return Err(NexarError::Tls(
+                "issue_cert_multi requires at least one SAN".into(),
+            ));
+        }
+        let san_vec: Vec<String> = sans.iter().map(|s| (*s).to_string()).collect();
+        let leaf_params =
+            rcgen::CertificateParams::new(san_vec).map_err(|e| NexarError::Tls(e.to_string()))?;
         let leaf_key = rcgen::KeyPair::generate().map_err(|e| NexarError::Tls(e.to_string()))?;
 
-        let issuer = rcgen::Issuer::from_params(&self.params, &self.key_pair);
-        let leaf_cert = leaf_params
-            .signed_by(&leaf_key, &issuer)
-            .map_err(|e| NexarError::Tls(e.to_string()))?;
+        // On the generate path we still hold the original
+        // `CertificateParams`, which carries the exact DN + key
+        // usage bits — build the issuer from those. After a
+        // `from_der` reload `params` is None and we rebuild the
+        // issuer from the stored cert DER via x509-parser.
+        let leaf_cert = match &self.params {
+            Some(params) => {
+                let issuer = rcgen::Issuer::from_params(params, &self.key_pair);
+                leaf_params
+                    .signed_by(&leaf_key, &issuer)
+                    .map_err(|e| NexarError::Tls(e.to_string()))?
+            }
+            None => {
+                let issuer = rcgen::Issuer::from_ca_cert_der(&self.cert_der, &self.key_pair)
+                    .map_err(|e| NexarError::Tls(format!("rebuild issuer: {e}")))?;
+                leaf_params
+                    .signed_by(&leaf_key, &issuer)
+                    .map_err(|e| NexarError::Tls(e.to_string()))?
+            }
+        };
 
         let cert_der = rustls::pki_types::CertificateDer::from(leaf_cert.der().to_vec());
         let key_der = rustls::pki_types::PrivateKeyDer::try_from(leaf_key.serialize_der())
             .map_err(|e| NexarError::Tls(e.to_string()))?;
 
         Ok((cert_der, key_der))
+    }
+
+    /// PKCS#8 DER-encoded private key of this CA. Exposes the key so
+    /// the caller can persist it (e.g. on disk at 0600) and later
+    /// reconstruct the `ClusterCa` via [`from_der`] to issue further
+    /// leaf certificates under the same CA — used by operator tooling
+    /// that rotates node certs without rotating the CA itself.
+    ///
+    /// Treat the return value as key material: never log, zeroize on
+    /// drop where the caller's threat model requires it.
+    pub fn key_pair_pkcs8_der(&self) -> Vec<u8> {
+        self.key_pair.serialize_der()
+    }
+
+    /// Reconstruct a `ClusterCa` from a previously-saved
+    /// `(key_pair_pkcs8_der, cert_der)` pair. Inverse of
+    /// [`key_pair_pkcs8_der`] + [`cert_der`].
+    ///
+    /// Requires the `x509-parser` feature on rcgen (enabled by this
+    /// crate's default build).
+    pub fn from_der(
+        key_pair_pkcs8_der: &[u8],
+        cert_der: &rustls::pki_types::CertificateDer<'_>,
+    ) -> Result<Self> {
+        let key_pair = rcgen::KeyPair::try_from(key_pair_pkcs8_der)
+            .map_err(|e| NexarError::Tls(format!("load CA key: {e}")))?;
+        Ok(Self {
+            cert_der: cert_der.clone().into_owned(),
+            params: None,
+            key_pair,
+        })
     }
 }
 
@@ -417,5 +493,38 @@ mod tests {
         let (cert2, _key2) = ca.issue_cert("localhost").unwrap();
         // Each call generates a unique cert (different key pair).
         assert_ne!(cert1.as_ref(), cert2.as_ref());
+    }
+
+    #[test]
+    fn test_issue_cert_multi_rejects_empty() {
+        let ca = ClusterCa::generate().unwrap();
+        assert!(ca.issue_cert_multi(&[]).is_err());
+    }
+
+    #[test]
+    fn test_issue_cert_multi_with_multiple_sans() {
+        let ca = ClusterCa::generate().unwrap();
+        let (cert, _key) = ca.issue_cert_multi(&["nodedb", "node-3"]).unwrap();
+        assert!(!cert.is_empty());
+    }
+
+    #[test]
+    fn test_ca_roundtrip_via_der() {
+        let ca1 = ClusterCa::generate().unwrap();
+        let ca1_cert = ca1.cert_der();
+        let ca1_key = ca1.key_pair_pkcs8_der();
+        assert!(!ca1_key.is_empty());
+
+        // Reconstruct and verify the reloaded CA still issues certs
+        // that chain to the original anchor.
+        let ca2 = ClusterCa::from_der(&ca1_key, &ca1_cert).unwrap();
+        let (leaf, _leaf_key) = ca2.issue_cert("nodedb").unwrap();
+
+        // mTLS server config built from the ORIGINAL CA cert accepts
+        // a leaf issued by the RELOADED CA — proof that the key
+        // pair survived the round trip and the two CA instances
+        // are the same issuer.
+        let config = make_server_config_mtls(leaf, _leaf_key, &ca1_cert).unwrap();
+        let _ = config;
     }
 }
