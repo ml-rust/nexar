@@ -1,77 +1,65 @@
+<div align="center">
+
 # nexar
 
-[![Crates.io](https://img.shields.io/crates/v/nexar.svg)](https://crates.io/crates/nexar) [![docs.rs](https://docs.rs/nexar/badge.svg)](https://docs.rs/nexar) [![CI](https://github.com/ml-rust/nexar/actions/workflows/ci.yml/badge.svg)](https://github.com/ml-rust/nexar/actions) [![License](https://img.shields.io/crates/l/nexar.svg)](LICENSE)
+<h3>Distributed runtime for Rust. QUIC transport and 11 collectives, with no MPI.</h3>
 
-Distributed runtime for Rust. QUIC transport, stream-multiplexed messaging, built-in collectives. Optional RDMA and GPUDirect for hardware-accelerated clusters.
+<p>
+Replaces MPI for inter-node communication. Point-to-point messages, collectives, and RPC run over QUIC without `mpirun` or an MPI library.
+</p>
 
-nexar replaces MPI for inter-node communication. It handles the network layer — point-to-point transfers, allreduce, broadcast, barrier — so your distributed application doesn't have to shell out to `mpirun` or link against libfabric.
+<p>
+  <a href="https://docs.rs/nexar"><strong>Docs</strong></a>
+  ·
+  <a href="https://crates.io/crates/nexar"><strong>Crate</strong></a>
+  ·
+  <a href="#collectives"><strong>Collectives</strong></a>
+  ·
+  <a href="#architecture"><strong>Architecture</strong></a>
+  ·
+  <a href="#quick-start"><strong>Example</strong></a>
+  ·
+  <a href="CONTRIBUTING.md"><strong>Contributing</strong></a>
+</p>
 
-## Why not MPI?
+<p>
+  <a href="https://discord.gg/jBhFk9kHPg">
+    <img src="https://img.shields.io/discord/1453357769720594543?label=Discord&logo=discord&logoColor=white&color=5865F2" alt="Join the Discord">
+  </a>
+</p>
 
-MPI works. It's also a C library with decades of accumulated complexity, a rigid process launcher, TCP-based transports that suffer from head-of-line blocking, and an implicit assumption that you'll manage serialization yourself.
+<p>
+  <a href="https://github.com/ml-rust/nexar/actions/workflows/ci.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/ml-rust/nexar/ci.yml?branch=main&label=ci" alt="CI status">
+  </a>
+  <a href="https://crates.io/crates/nexar">
+    <img src="https://img.shields.io/crates/v/nexar" alt="crates.io">
+  </a>
+  <a href="https://docs.rs/nexar">
+    <img src="https://img.shields.io/docsrs/nexar" alt="docs.rs">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/crates/l/nexar" alt="License">
+  </a>
+  <a href="https://github.com/ml-rust/nexar/stargazers">
+    <img src="https://img.shields.io/github/stars/ml-rust/nexar?style=social" alt="GitHub stars">
+  </a>
+</p>
 
-nexar takes a different approach:
+</div>
 
-- **QUIC transport** (via quinn). Multiplexed streams mean a stalled tensor transfer doesn't block your barrier. TLS is built into the protocol.
-- **No process launcher.** A lightweight seed node handles discovery. Workers connect, get a rank, and form a direct peer-to-peer mesh. Nodes can join and leave.
-- **Zero-config by default.** Pure Rust QUIC transport works everywhere with `cargo build`. No `mpirun`, no `libfabric`, no `libucp`.
-- **Hardware acceleration when available.** Optional RDMA via the `nexar-rdma` crate for InfiniBand/RoCE kernel bypass. Optional GPUDirect for GPU memory → NIC direct transfer. Same pattern as CUDA in the rest of the ml-rust stack.
-- **Async-native.** Built on tokio. Send and receive overlap naturally.
+nexar handles the network layer for distributed Rust programs. It provides point-to-point transfers, collectives, elastic membership, and fault recovery. Workers find each other through a seed node and form a direct peer-to-peer mesh.
 
-## What it provides
+## Quick Start
 
-**Point-to-point:**
+Add the crates to your project:
 
-- `send` / `recv` — tagged messages between any two ranks
-
-**Collectives:**
-
-- `all_reduce` — ring-based scatter-reduce + allgather
-- `broadcast` — tree-based fan-out from root
-- `all_gather` — ring-based gather
-- `reduce_scatter` — ring-based reduce-scatter
-- `reduce` — tree-based reduce to root
-- `all_to_all` — all-to-all exchange
-- `gather` — gather to root
-- `scatter` — scatter from root
-- `scan` / `exclusive_scan` — inclusive/exclusive prefix scan
-- `barrier` — distributed synchronization (two-phase for small clusters, dissemination for larger)
-
-**Elastic membership:**
-
-- `rebuild_adding` / `rebuild_excluding` — grow or shrink the communicator at runtime without restarting the job.
-
-**Fault recovery:**
-
-- Automatic, manual, or abort policies when nodes die. Healthy nodes agree on the failure set and rebuild the communicator.
-
-**Sparse topologies:**
-
-- `FullMesh`, `KRegular`, `Hypercube` strategies with automatic relay routing for non-neighbors. At scale, O(N²) connections don't work — KRegular gives O(K·N).
-
-**Non-blocking collectives:**
-
-- `all_reduce_nb`, `broadcast_nb`, etc. — return a `CollectiveHandle` you can await later. Overlap computation with communication.
-
-**RPC:**
-
-- Register handlers by function ID, call them by rank. Responses are matched per-request, so concurrent RPCs don't interfere.
-
-**Device abstraction:**
-
-- `DeviceAdapter` trait lets GPU backends stage memory for network I/O without nexar knowing anything about CUDA or ROCm. `CpuAdapter` is included; `CudaAdapter` is available via the `nexar-rdma` crate (with the `gpudirect` feature).
-
-## Quick start
-
-Add to `Cargo.toml`:
-
-```toml
-[dependencies]
-nexar = "<use-latest-version>"
-tokio = { version = "1", features = ["full"] }
+```bash
+cargo add nexar
+cargo add tokio --features full
 ```
 
-Bootstrap a local cluster and run allreduce:
+Start a 4-rank local cluster and run an in-place allreduce:
 
 ```rust
 use nexar::{NexarClient, CpuAdapter, DataType, ReduceOp};
@@ -102,20 +90,52 @@ async fn main() -> nexar::Result<()> {
 }
 ```
 
+The raw-pointer collective methods are `unsafe`. The caller must keep the buffer valid and sized for `count` elements of `dtype` until the call returns.
+
+## Collectives
+
+`NexarClient` exposes 11 collectives. Each one has an `_nb` variant that returns a `CollectiveHandle`. Call `wait` on the handle to finish the operation.
+
+| Operation        | Algorithm                                                            |
+| ---------------- | -------------------------------------------------------------------- |
+| `all_reduce`     | Ring. Basic ring for small worlds, pipelined ring for large messages |
+| `broadcast`      | Flat fan-out for small worlds, tree for larger worlds                |
+| `all_gather`     | Ring                                                                 |
+| `reduce_scatter` | Ring                                                                 |
+| `reduce`         | Binomial tree                                                        |
+| `all_to_all`     | Each rank sends a distinct chunk to every other rank                 |
+| `gather`         | Root receives from all peers concurrently                            |
+| `scatter`        | Root sends one chunk to each rank                                    |
+| `scan`           | Hillis-Steele prefix, O(log N) rounds                                |
+| `exclusive_scan` | Exclusive variant of `scan`                                          |
+| `barrier`        | Two-phase below 5 ranks, dissemination at 5 or more ranks            |
+
+The client also exposes `all_reduce_host`, `all_reduce_device`, and the other `_host` and `_device` variants. The `_device` variants take memory managed by a `DeviceAdapter`.
+
+## Features
+
+- **Point-to-point:** tagged `send` and `recv` between any two ranks.
+- **Elastic membership:** `rebuild_adding` and `rebuild_excluding` change the communicator at run time.
+- **Fault recovery:** `RecoveryPolicy::Automatic`, `Manual`, or `Abort`. Healthy ranks agree on the failed set and rebuild.
+- **Sparse topologies:** `TopologyStrategy::FullMesh`, `KRegular { degree }`, and `Hypercube`. Traffic to non-neighbors relays through peers.
+- **Compressed allreduce:** `TopKCompressor` and random-K gradient compression.
+- **RPC:** `register_rpc` registers a handler by function ID. `rpc` and `rpc_with_timeout` call it on a rank. Responses match requests by request ID.
+- **Device adapters:** the `DeviceAdapter` trait stages device memory for network I/O. `CpuAdapter` ships with nexar. `CudaAdapter` ships with `nexar-rdma` behind the `gpudirect` feature.
+
 ## Examples
 
-Runnable examples in [`nexar/examples/`](nexar/examples/):
+Runnable examples live in [`nexar/examples/`](nexar/examples/):
 
-| Example                                        | What it shows                                                         |
-| ---------------------------------------------- | --------------------------------------------------------------------- |
-| [`send_recv`](nexar/examples/send_recv.rs)     | Point-to-point tagged send/recv between two ranks                     |
-| [`allreduce`](nexar/examples/allreduce.rs)     | Ring-allreduce (Sum) across 4 ranks                                   |
-| [`broadcast`](nexar/examples/broadcast.rs)     | Tree broadcast from root to all ranks                                 |
-| [`barrier`](nexar/examples/barrier.rs)         | Barrier synchronization with staggered arrivals                       |
-| [`rpc`](nexar/examples/rpc.rs)                 | Register a remote function, call it across ranks                      |
-| [`seed_worker`](nexar/examples/seed_worker.rs) | Manual cluster setup with seed/worker nodes (real deployment pattern) |
+| Example                                        | What it shows                                         |
+| ---------------------------------------------- | ----------------------------------------------------- |
+| [`send_recv`](nexar/examples/send_recv.rs)     | Point-to-point tagged send and recv between two ranks |
+| [`allreduce`](nexar/examples/allreduce.rs)     | Ring allreduce (Sum) across 4 ranks                   |
+| [`broadcast`](nexar/examples/broadcast.rs)     | Tree broadcast from root to all ranks                 |
+| [`barrier`](nexar/examples/barrier.rs)         | Barrier synchronization with staggered arrivals       |
+| [`rpc`](nexar/examples/rpc.rs)                 | Register a remote function and call it across ranks   |
+| [`seed_worker`](nexar/examples/seed_worker.rs) | Manual cluster setup with seed and worker nodes       |
 
-Run any example with:
+Run an example from the repository root:
 
 ```bash
 cargo run -p nexar --example send_recv
@@ -135,74 +155,72 @@ seed node (discovery only, no data routing)
     └── direct peer-to-peer mesh
 ```
 
-Workers connect to the seed to get a rank and peer list, then establish direct QUIC connections to every other worker. The seed is not on the data path.
+Workers connect to the seed to get a rank and a peer list. They then open direct QUIC connections to their peers. The seed is not on the data path.
 
-Each peer connection runs a **router** — a background task that accepts incoming QUIC streams and dispatches them to typed channels:
+Each peer connection runs a router. The router accepts incoming QUIC streams and sends each one to a typed lane:
 
-| Lane            | Traffic                             | Consumer                      |
-| --------------- | ----------------------------------- | ----------------------------- |
-| `rpc_requests`  | Incoming RPC calls                  | Dispatcher serve loop         |
-| `rpc_responses` | RPC replies (matched by request ID) | `rpc()` caller via oneshot    |
-| `control`       | Barrier, heartbeat, join/leave      | Barrier logic, health monitor |
-| `data`          | Point-to-point `send`/`recv`        | Application code              |
-| `raw`           | Bulk byte streams                   | Tensor transfers              |
+| Lane            | Traffic                            | Consumer                      |
+| --------------- | ---------------------------------- | ----------------------------- |
+| `rpc_requests`  | Incoming RPC calls                 | Dispatcher serve loop         |
+| `rpc_responses` | RPC replies, matched by request ID | `rpc()` caller via oneshot    |
+| `control`       | Barrier, heartbeat, join and leave | Barrier logic, health monitor |
+| `data`          | Point-to-point `send` and `recv`   | Application code              |
+| `raw`           | Bulk byte streams                  | Tensor transfers              |
 
-Lanes are independent. A full `data` channel doesn't block `control` messages.
+Each lane has its own bounded channel.
 
-## Stream protocol
+### Stream protocol
 
-Every QUIC unidirectional stream starts with a 1-byte tag:
+Each QUIC unidirectional stream starts with a 1-byte tag:
 
-- `0x01` — framed message (8-byte LE length prefix + serialized `NexarMessage`)
-- `0x02` — raw bytes (8-byte LE length prefix + payload)
+| Tag    | Stream content                                                                |
+| ------ | ----------------------------------------------------------------------------- |
+| `0x01` | Framed message: 8-byte little-endian length, then a serialized `NexarMessage` |
+| `0x02` | Raw bytes: 8-byte little-endian length, then the payload                      |
+| `0x03` | Raw bytes for a split communicator: `comm_id` prefix, then length and payload |
+| `0x04` | Raw bytes for a tagged send: tag prefix, then length and payload              |
 
-Messages are serialized with rkyv (zero-copy deserialization). Maximum message size is 4 GiB.
+Messages use rkyv serialization.
 
-## When to use nexar
+## Crates
+
+| Crate                      | What it provides                                             | Native dependencies                  |
+| -------------------------- | ------------------------------------------------------------ | ------------------------------------ |
+| `nexar`                    | Core runtime: QUIC transport, collectives, RPC               | `ring` builds bundled C and assembly |
+| `nexar-rdma`               | RDMA transport for InfiniBand and RoCE                       | `libibverbs` (rdma-core)             |
+| `nexar-rdma` + `gpudirect` | GPU memory to RDMA NIC, `CudaAdapter`                        | `libibverbs` and CUDA runtime        |
+| `nexar-nccl`               | Hierarchical communicator: NCCL intra-node, nexar inter-node | CUDA runtime and NCCL                |
+
+Build each crate from the repository root:
+
+```bash
+cargo build -p nexar --release
+cargo build -p nexar-rdma --release
+cargo build -p nexar-rdma --release --features gpudirect
+cargo build -p nexar-nccl --release
+```
+
+Requires Rust 1.89 or later. See [CONTRIBUTING.md](CONTRIBUTING.md) for test and lint commands.
+
+## When to Use nexar
 
 **Use nexar when:**
 
-- You need collectives (allreduce, broadcast) across machines
-- You want async, non-blocking communication in Rust
-- You don't want to deal with MPI installation, `mpirun`, or C FFI
-- You're building distributed ML training or inference
+- You need collectives such as allreduce or broadcast across machines.
+- You want async, non-blocking communication in Rust.
+- You want to avoid MPI installation, `mpirun`, and C FFI.
+- You are building distributed ML training or inference.
 
-**Don't use nexar when:**
+**Use NCCL directly when:**
 
-- Your GPUs are on the same machine — use NCCL directly (NVLink is 10-100x faster than any network)
-- You're already happy with MPI
+- All GPUs sit in one machine. NCCL uses the local interconnect without a network hop.
 
-## Building
+## Contributing
 
-```bash
-# Core (pure Rust, zero C deps)
-cargo build -p nexar --release
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for conventions and checks.
 
-# RDMA transport (requires libibverbs / rdma-core)
-cargo build -p nexar-rdma --release
-
-# GPUDirect RDMA (requires libibverbs + CUDA)
-cargo build -p nexar-rdma --release --features gpudirect
-
-# Hierarchical NCCL + nexar (requires CUDA + NCCL)
-cargo build -p nexar-nccl --release
-
-# Full workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets
-```
-
-Requires Rust 1.89+.
-
-## Workspace crates
-
-| Crate                      | What it provides                                              | C dependencies              |
-| -------------------------- | ------------------------------------------------------------- | --------------------------- |
-| `nexar`                    | Core runtime: QUIC transport, collectives, RPC                | None                        |
-| `nexar-rdma`               | RDMA transport extension (InfiniBand/RoCE kernel bypass)      | `libibverbs` (rdma-core)    |
-| `nexar-rdma` + `gpudirect` | GPU memory → RDMA NIC directly, `CudaAdapter`                 | `libibverbs` + CUDA runtime |
-| `nexar-nccl`               | Hierarchical communicator: NCCL intra-node + nexar inter-node | CUDA runtime + NCCL         |
+Questions and design discussion happen on [Discord](https://discord.gg/jBhFk9kHPg).
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+Licensed under Apache-2.0. See [LICENSE](LICENSE).
