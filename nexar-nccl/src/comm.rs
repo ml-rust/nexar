@@ -14,6 +14,12 @@ use crate::topology::NodeTopology;
 /// For multi-node clusters, the 2D decomposition splits work between:
 /// - NCCL for same-node GPU-GPU (NVLink/PCIe speed)
 /// - nexar for cross-node (QUIC/RDMA)
+///
+/// # Shutdown
+///
+/// [`NexarClient::shutdown`] needs sole ownership of the client. Drop this
+/// communicator first, then take the client with [`Arc::into_inner`] and
+/// call `shutdown` on every rank before exit.
 pub struct HierarchicalComm {
     /// The full nexar client (all ranks).
     nexar: Arc<NexarClient>,

@@ -96,7 +96,7 @@ impl NexarClient {
     /// [`NexarError::PeerDisconnected`](crate::NexarError::PeerDisconnected).
     pub async fn recv_bytes_tagged(&self, src: Rank, tag: u64) -> Result<PooledBuf> {
         self.router(src)?
-            .recv_lane(self.tagged_lane(tag), src)
+            .recv_lane(src, self.tagged_lane(tag))
             .await
     }
 
@@ -140,7 +140,7 @@ impl NexarClient {
     ///
     /// Uses comm-aware recv for split communicators.
     pub async fn recv_bytes(&self, src: Rank) -> Result<PooledBuf> {
-        self.router(src)?.recv_lane(self.raw_lane(), src).await
+        self.router(src)?.recv_lane(src, self.raw_lane()).await
     }
 }
 

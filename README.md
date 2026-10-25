@@ -137,7 +137,7 @@ Formation runs in four steps:
 Set these on every host:
 
 - **Seed address:** every process uses the address the seed binds. Rank 0 binds it.
-- **Token:** the bootstrap connection does not verify the seed's certificate. The token is the only defense against a stranger who joins or poses as the seed. A bind, seed, or advertise address that is not loopback requires a token. Use the same secret on every process.
+- **Token:** the bootstrap connection does not verify the seed's certificate. The token is the only defense against a stranger who joins or poses as the seed. A bind, seed, or advertise address that is not loopback requires a token, on every `SeedNode` constructor too. Use the same secret on every process.
 - **Firewall:** open the seed port for UDP. Open each rank's mesh port for UDP (QUIC) and TCP (bulk sidecar). With `bind_addr` port 0, the ports are ephemeral. Fix the port to write a firewall rule.
 - **NAT and containers:** set `advertise_addr` to the address peers can reach. With a published container port, map the same port for UDP and TCP.
 - **Sidecar:** set the same `enable_tcp_bulk_sidecar` and `encrypt_bulk_transport` on every rank. A mismatch fails formation. Set `max_frame_bytes` (default 4 GiB) to the largest message you send; a longer frame closes the sidecar with `FrameTooLarge`.
@@ -146,7 +146,9 @@ Set these on every host:
 
 Call `client.shutdown().await` on every rank after its last send and recv, before the process exits. Closing a QUIC connection discards data the peer has not acknowledged, so a rank that exits right after its last collective can lose that collective's final message.
 
-`shutdown` flushes and closes the TCP sidecars, exchanges a done signal with every direct peer, and closes each connection once the peer is done too. A peer that dropped its client counts as done. After the barrier timeout, or the limit passed to `shutdown_with_timeout`, every connection closes anyway and the call returns `ShutdownIncomplete` with the peers that did not finish.
+`shutdown` flushes and closes the TCP sidecars, exchanges a `DONE` byte with every direct peer, and closes each connection once the peer is done too. A peer that dropped its client counts as done. After the barrier timeout, or the limit passed to `shutdown_with_timeout`, every connection closes anyway and the call returns `ShutdownIncomplete` with the peers that did not finish. A peer that answers with another byte, finishes its stream early, or resets it lands in `ShutdownIncomplete::bad_signal`.
+
+`shutdown` takes the client by value. A client shared as `Arc<NexarClient>` needs every other holder dropped first, then `Arc::into_inner`.
 
 Dropping the last client that shares a mesh closes its connections at once. Unlike `shutdown`, a drop can lose unacknowledged data.
 

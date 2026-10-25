@@ -6,6 +6,7 @@ use crate::types::{PROTOCOL_VERSION, Rank};
 /// Carried by [`NexarMessage::Abort`](crate::protocol::NexarMessage::Abort).
 /// The receiver turns it into a typed [`NexarError`] with [`AbortReason::into_error`].
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AbortReason {
     /// The joiner's cluster token does not match the seed's token.
     TokenMismatch,

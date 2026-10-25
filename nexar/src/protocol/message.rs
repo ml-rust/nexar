@@ -7,6 +7,7 @@ use crate::types::Rank;
 /// dedicated QUIC unidirectional streams with a minimal binary header
 /// followed by raw bytes — avoiding rkyv overhead on large payloads.
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum NexarMessage {
     /// Initial handshake from worker to seed.
     Hello {

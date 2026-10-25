@@ -31,13 +31,28 @@ nexar-nccl = "<use-latest-version>"
 
 ```rust
 use nexar_nccl::{form_hierarchical_comm, HierarchicalComm};
+use std::sync::Arc;
 
 // All ranks call collectively after nexar bootstrap:
-let comm = unsafe { form_hierarchical_comm(nexar_client, cuda_stream).await? };
+// `nexar_client` is an `Arc<NexarClient>`.
+let comm = unsafe { form_hierarchical_comm(Arc::clone(&nexar_client), cuda_stream).await? };
 
 // Then use like any communicator:
 unsafe { comm.allreduce(ptr, count, dtype, op).await? };
 ```
+
+## Shutdown
+
+Every rank calls `NexarClient::shutdown` before exit. It takes the client by value, so it needs sole ownership. `HierarchicalComm` holds an `Arc<NexarClient>` and a split inter-node client, so drop the communicator first:
+
+```rust
+drop(comm); // releases its Arc clone and the inter-node split client
+let client = std::sync::Arc::into_inner(nexar_client)
+    .expect("another Arc<NexarClient> clone is still alive");
+client.shutdown().await?;
+```
+
+`Arc::into_inner` returns `None` while any other clone is alive. Drop every clone before the call.
 
 ## Building
 

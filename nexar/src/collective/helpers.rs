@@ -97,11 +97,13 @@ pub(crate) async fn collective_send(
         let result = tokio::time::timeout(
             timeout,
             crate::transport::relay::send_or_relay_tagged(
-                client.rank(),
-                &client.peers,
-                rt,
-                &client.config.topology,
-                client.world_size(),
+                crate::transport::relay::RelayRoute {
+                    my_rank: client.rank(),
+                    peers: &client.peers,
+                    routing_table: rt,
+                    strategy: &client.config.topology,
+                    world_size: client.world_size(),
+                },
                 dest,
                 t,
                 data,

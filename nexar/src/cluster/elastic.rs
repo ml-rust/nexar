@@ -5,6 +5,7 @@
 
 use crate::client::NexarClient;
 use crate::cluster::seed::PendingJoin;
+use crate::cluster::worker::NodeCredentials;
 use crate::config::NexarConfig;
 use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
@@ -69,9 +70,7 @@ pub struct ElasticManager {
     config: ElasticConfig,
     nexar_config: Arc<NexarConfig>,
     /// TLS credentials for establishing mesh connections to new peers.
-    ca_cert: Vec<u8>,
-    my_cert: Vec<u8>,
-    my_key: Vec<u8>,
+    credentials: NodeCredentials,
     /// Seed address for add_nodes testing helper.
     seed_addr: Option<SocketAddr>,
     /// Listeners for newly joined workers (kept alive so peers can connect).
@@ -88,9 +87,7 @@ impl Clone for ElasticManager {
             event_tx: self.event_tx.clone(),
             config: self.config.clone(),
             nexar_config: Arc::clone(&self.nexar_config),
-            ca_cert: self.ca_cert.clone(),
-            my_cert: self.my_cert.clone(),
-            my_key: self.my_key.clone(),
+            credentials: self.credentials.clone(),
             seed_addr: self.seed_addr,
             new_worker_listeners: Arc::clone(&self.new_worker_listeners),
         }
@@ -99,14 +96,13 @@ impl Clone for ElasticManager {
 
 impl ElasticManager {
     /// Create a new elastic manager wrapping the given client.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// `credentials` are this rank's mesh mTLS credentials from the seed.
     pub fn new(
         client: NexarClient,
         config: ElasticConfig,
         nexar_config: NexarConfig,
-        ca_cert: Vec<u8>,
-        my_cert: Vec<u8>,
-        my_key: Vec<u8>,
+        credentials: NodeCredentials,
         pending_joins: Arc<StdMutex<Vec<PendingJoin>>>,
         seed_addr: Option<SocketAddr>,
     ) -> Self {
@@ -119,9 +115,7 @@ impl ElasticManager {
             event_tx,
             config,
             nexar_config: Arc::new(nexar_config),
-            ca_cert,
-            my_cert,
-            my_key,
+            credentials,
             seed_addr,
             new_worker_listeners: Arc::new(StdMutex::new(Vec::new())),
         }
@@ -298,9 +292,10 @@ impl ElasticManager {
         let mut client = self.client.lock().await;
 
         if !joined.is_empty() {
-            let ca_der = rustls::pki_types::CertificateDer::from(self.ca_cert.clone());
-            let my_cert_der = rustls::pki_types::CertificateDer::from(self.my_cert.clone());
-            let my_key_der = rustls::pki_types::PrivateKeyDer::try_from(self.my_key.clone())
+            let creds = &self.credentials;
+            let ca_der = rustls::pki_types::CertificateDer::from(creds.ca_cert.clone());
+            let my_cert_der = rustls::pki_types::CertificateDer::from(creds.node_cert.clone());
+            let my_key_der = rustls::pki_types::PrivateKeyDer::try_from(creds.node_key.clone())
                 .map_err(|e| NexarError::Tls(format!("parse private key for mesh connect: {e}")))?;
             let client_config = make_client_config_mtls(my_cert_der, my_key_der, &ca_der)?;
 

@@ -24,11 +24,24 @@ nexar-rdma = "<use-latest-version>"
 ```rust
 use nexar_rdma::{bootstrap::establish_rdma_mesh, PeerConnectionRdmaExt};
 
-// After nexar bootstrap, layer RDMA on top:
-establish_rdma_mesh(&clients).await;
+// After nexar bootstrap, each rank layers RDMA on top:
+establish_rdma_mesh(&client).await?;
 ```
 
 With the `gpudirect` feature, `CudaAdapter` implements nexar's `DeviceAdapter` trait for GPU memory, and `NexarClientRdmaExt` adds RDMA-accelerated collective operations.
+
+## Shutdown
+
+Every rank calls `NexarClient::shutdown` before exit, after its last RDMA and QUIC transfer. Shutdown drains QUIC streams and TCP sidecars only, so await every RDMA send and receive first. The RDMA state lives in the client's peer connections and drops with them.
+
+`shutdown` takes the client by value, so it needs sole ownership. A client shared as `Arc<NexarClient>` (for example by a `nexar-nccl` `HierarchicalComm`) needs every other holder dropped first:
+
+```rust
+drop(comm); // every holder of an Arc clone
+let client = std::sync::Arc::into_inner(client)
+    .expect("another Arc<NexarClient> clone is still alive");
+client.shutdown().await?;
+```
 
 ## Building
 

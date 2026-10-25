@@ -20,6 +20,7 @@ pub(crate) const MAX_SKIPS: u32 = 1024;
 /// The sending [`PeerConnection`](crate::PeerConnection) numbers every
 /// sequenced message to one peer, so each lane is FIFO per sender.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum LaneKey {
     /// Untagged bytes: `send_bytes` / `recv_bytes`.
     Raw { comm_id: u64 },
@@ -120,6 +121,7 @@ impl SeqHeader {
 /// A receiver of a key never takes, or fails on, a message of another key.
 /// Keys with an epoch keep the rounds of one protocol apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ControlKey {
     Barrier {
         comm_id: u64,

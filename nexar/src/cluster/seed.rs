@@ -48,8 +48,9 @@ impl SeedNode {
     /// Create a seed node bound to the given address.
     ///
     /// If `NEXAR_CLUSTER_TOKEN` is set, workers must present the same token in
-    /// their Hello. If it is not set, the seed generates a random token and
-    /// logs it, so that workers can be configured with it.
+    /// their Hello. If it is not set, the seed generates a random ASCII hex
+    /// token. The seed never logs it: read it with [`SeedNode::cluster_token`]
+    /// and set it as `NEXAR_CLUSTER_TOKEN` on every worker over a trusted channel.
     pub fn bind(addr: SocketAddr, expected_world_size: u32) -> Result<Self> {
         let cluster_token = match std::env::var(crate::cluster::CLUSTER_TOKEN_ENV) {
             Ok(t) if !t.is_empty() => {
@@ -63,8 +64,8 @@ impl SeedNode {
                 let token: Vec<u8> = ephemeral_key.serialize_der().into_iter().take(32).collect();
                 let hex_token: String = token.iter().map(|b| format!("{b:02x}")).collect();
                 tracing::warn!(
-                    "NEXAR_CLUSTER_TOKEN not set — auto-generated token: {hex_token}. \
-                     Set NEXAR_CLUSTER_TOKEN={hex_token} on workers to authenticate."
+                    "NEXAR_CLUSTER_TOKEN not set: the seed generated a random cluster token; \
+                     read it with SeedNode::cluster_token and set NEXAR_CLUSTER_TOKEN to it on every worker"
                 );
                 hex_token.into_bytes()
             }
@@ -72,17 +73,28 @@ impl SeedNode {
         Self::bind_with_token(addr, expected_world_size, Some(cluster_token))
     }
 
-    /// Create a seed node for loopback testing (no token enforcement).
+    /// Create a seed node without a token check, for a loopback address only.
+    ///
+    /// A non-loopback `addr` returns [`NexarError::TokenRequired`]: use
+    /// [`SeedNode::bind_with_token`] or [`SeedNode::from_config`] with a token.
     pub fn bind_local(addr: SocketAddr, expected_world_size: u32) -> Result<Self> {
         Self::bind_with_token(addr, expected_world_size, None)
     }
 
-    /// Create a seed node that checks `token`. `None` disables the check.
+    /// Create a seed node that checks `token`.
+    ///
+    /// `None` or an empty token disables the check. That is legal only on a
+    /// loopback `addr`: a non-loopback `addr` without a token returns
+    /// [`NexarError::TokenRequired`] before the seed binds.
     pub fn bind_with_token(
         addr: SocketAddr,
         expected_world_size: u32,
         token: Option<Vec<u8>>,
     ) -> Result<Self> {
+        let token = token.filter(|t| !t.is_empty());
+        if token.is_none() && !addr.ip().is_loopback() {
+            return Err(NexarError::TokenRequired { addr });
+        }
         Ok(Self {
             listener: TransportListener::bind(addr)?,
             expected_world_size,
@@ -117,6 +129,13 @@ impl SeedNode {
     /// The number of ranks this seed waits for.
     pub fn world_size(&self) -> u32 {
         self.expected_world_size
+    }
+
+    /// The token this seed checks. `None`: no check (loopback only).
+    ///
+    /// Workers must present this token. It is a secret: never log it.
+    pub fn cluster_token(&self) -> Option<&[u8]> {
+        self.cluster_token.as_deref()
     }
 
     /// The token this seed checks, for the seed process's own join.
@@ -234,5 +253,37 @@ mod tests {
         ));
         let seed = SeedNode::from_config(addr, &cfg.with_cluster_token("t")).unwrap();
         assert_eq!(seed.world_size(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_bind_local_rejects_non_loopback() {
+        let addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        match SeedNode::bind_local(addr, 2) {
+            Err(NexarError::TokenRequired { addr: a }) => assert_eq!(a, addr),
+            other => panic!("expected TokenRequired, got {:?}", other.err()),
+        }
+        let seed = SeedNode::bind_local("127.0.0.1:0".parse().unwrap(), 2).unwrap();
+        assert!(seed.cluster_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_bind_with_token_requires_token_off_loopback() {
+        let addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        assert!(matches!(
+            SeedNode::bind_with_token(addr, 2, None),
+            Err(NexarError::TokenRequired { .. })
+        ));
+        assert!(matches!(
+            SeedNode::bind_with_token(addr, 2, Some(Vec::new())),
+            Err(NexarError::TokenRequired { .. })
+        ));
+        let seed = SeedNode::bind_with_token(addr, 2, Some(b"t".to_vec())).unwrap();
+        assert_eq!(seed.cluster_token(), Some(&b"t"[..]));
+    }
+
+    #[tokio::test]
+    async fn test_bind_always_has_token() {
+        let seed = SeedNode::bind("0.0.0.0:0".parse().unwrap(), 2).unwrap();
+        assert!(seed.cluster_token().is_some_and(|t| !t.is_empty()));
     }
 }

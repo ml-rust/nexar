@@ -25,6 +25,7 @@ use crate::types::{DataType, ReduceOp};
 /// # Safety
 /// - `ptr` must be valid for at least `count * dtype.size_in_bytes()` bytes.
 /// - `residual` must be valid for at least `count * dtype.size_in_bytes()` bytes.
+// The raw-pointer allreduce arguments, plus the compressor, its residual, and the tag.
 #[allow(clippy::too_many_arguments)]
 pub async unsafe fn ring_allreduce_compressed(
     client: &NexarClient,

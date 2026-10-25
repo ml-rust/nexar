@@ -3,6 +3,7 @@ use crate::types::Rank;
 pub type Result<T> = std::result::Result<T, NexarError>;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NexarError {
     #[error("connection to rank {rank} failed: {reason}")]
     ConnectionFailed { rank: Rank, reason: String },
@@ -93,11 +94,15 @@ pub enum NexarError {
     },
 
     #[error(
-        "shutdown incomplete after {timeout_ms}ms: peers {timed_out:?} did not shut down in time, peers {disconnected:?} disconnected first; data sent to them may be lost, so call shutdown on every rank"
+        "shutdown incomplete (limit {timeout_ms}ms): peers {timed_out:?} did not shut down in time, peers {disconnected:?} disconnected first, peers {bad_signal:?} answered without the DONE byte; data sent to them can be lost, so call shutdown on every rank and run the same nexar version everywhere"
     )]
     ShutdownIncomplete {
+        /// Peers that did not finish before the time limit.
         timed_out: Vec<Rank>,
+        /// Peers whose connection was lost without an application close.
         disconnected: Vec<Rank>,
+        /// Peers that sent a wrong byte, finished early, or reset the stream.
+        bad_signal: Vec<Rank>,
         timeout_ms: u64,
     },
 
@@ -105,7 +110,7 @@ pub enum NexarError {
     BootstrapAborted { reason: String },
 
     #[error(
-        "cluster token required for non-loopback address {addr}: set ClusterConfig::cluster_token or NEXAR_CLUSTER_TOKEN to the same secret on every process"
+        "cluster token required for non-loopback address {addr}: bind a loopback address, or set the same secret on every process via ClusterConfig::cluster_token, NEXAR_CLUSTER_TOKEN, or the SeedNode::bind_with_token argument"
     )]
     TokenRequired { addr: std::net::SocketAddr },
 
@@ -301,6 +306,7 @@ mod tests {
             NexarError::ShutdownIncomplete {
                 timed_out: vec![1],
                 disconnected: vec![],
+                bad_signal: vec![2],
                 timeout_ms: 10,
             },
             NexarError::TokenRequired {

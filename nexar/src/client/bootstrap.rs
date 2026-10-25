@@ -1,7 +1,7 @@
 use crate::client::NexarClient;
-use crate::client::bootstrap_cluster::{Credentials, join_cluster};
+use crate::client::bootstrap_cluster::join_cluster;
 use crate::cluster::elastic::{ElasticBootstrap, ElasticConfig, ElasticManager};
-use crate::cluster::{ClusterConfig, FormClusterResult, PendingJoin, SeedNode};
+use crate::cluster::{ClusterConfig, FormClusterResult, NodeCredentials, PendingJoin, SeedNode};
 use crate::config::NexarConfig;
 use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
@@ -63,9 +63,7 @@ impl NexarClient {
                     client,
                     elastic_config.clone(),
                     nexar_config.clone(),
-                    creds.ca_cert,
-                    creds.node_cert,
-                    creds.node_key,
+                    creds,
                     Arc::clone(&pending_joins),
                     Some(seed_addr),
                 )
@@ -83,7 +81,7 @@ impl NexarClient {
 struct LocalCluster {
     seed: Arc<SeedNode>,
     formed: FormClusterResult,
-    members: Vec<(NexarClient, Credentials)>,
+    members: Vec<(NexarClient, NodeCredentials)>,
 }
 
 /// Run a loopback seed and `world_size` ranks as tasks of this runtime.

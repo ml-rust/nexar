@@ -18,6 +18,19 @@ const CONNECT_ATTEMPT: Duration = Duration::from_secs(10);
 /// Largest pause between connect attempts.
 const MAX_BACKOFF: Duration = Duration::from_secs(2);
 
+/// The DER-encoded mTLS credentials a rank receives from the seed.
+///
+/// `Debug` is not derived: `node_key` is a secret.
+#[derive(Clone)]
+pub struct NodeCredentials {
+    /// Cluster CA certificate (trust anchor for mesh mTLS).
+    pub ca_cert: Vec<u8>,
+    /// Leaf certificate for this node, signed by the cluster CA.
+    pub node_cert: Vec<u8>,
+    /// Private key of this node's leaf certificate.
+    pub node_key: Vec<u8>,
+}
+
 /// What a worker presents to the seed.
 pub(crate) struct JoinRequest {
     pub token: Option<Vec<u8>>,
@@ -58,6 +71,15 @@ struct SeedSession {
 }
 
 impl WorkerNode {
+    /// A copy of the mTLS credentials this worker received from the seed.
+    pub fn credentials(&self) -> NodeCredentials {
+        NodeCredentials {
+            ca_cert: self.ca_cert.clone(),
+            node_cert: self.node_cert.clone(),
+            node_key: self.node_key.clone(),
+        }
+    }
+
     /// Connect to the seed, complete the handshake, and receive a rank.
     ///
     /// Presents the token from `NEXAR_CLUSTER_TOKEN` and waits at most the

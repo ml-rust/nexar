@@ -167,20 +167,22 @@ impl PeerRouter {
         self.rpc_waiters.lock().await.remove(&req_id);
     }
 
-    /// Receive the next message of `lane`, in send order.
+    /// Receive the next message of `lane` from this router's peer `rank`, in send order.
     ///
     /// Messages of other lanes stay queued. After the connection closes and
     /// `lane` has no complete message left, returns
     /// [`NexarError::PeerDisconnected`] naming `rank`. Cancel-safe.
-    pub async fn recv_lane(&self, lane: LaneKey, rank: Rank) -> Result<PooledBuf> {
+    pub async fn recv_lane(&self, rank: Rank, lane: LaneKey) -> Result<PooledBuf> {
         self.lanes
             .recv(lane)
             .await
             .ok_or(NexarError::PeerDisconnected { rank })
     }
 
-    /// Receive a control message with key `key`. Cancel-safe.
-    pub async fn recv_control(&self, key: ControlKey, rank: Rank) -> Result<NexarMessage> {
+    /// Receive a control message with key `key` from this router's peer `rank`.
+    ///
+    /// `rank` names the peer in [`NexarError::PeerDisconnected`]. Cancel-safe.
+    pub async fn recv_control(&self, rank: Rank, key: ControlKey) -> Result<NexarMessage> {
         self.control
             .recv(&key)
             .await

@@ -8,6 +8,7 @@
 //! 2. Each side opens a bidirectional stream and writes one `DONE` byte.
 //! 3. Each side waits for the peer's `DONE` byte, or for the peer to close the
 //!    connection on purpose. Either means the peer read everything it needs.
+//!    Any other byte, an early finish, or a stream reset is an error.
 //! 4. Each side closes the connection and waits until the endpoint sends the close.
 
 use crate::client::NexarClient;
@@ -99,6 +100,9 @@ impl NexarClient {
     ///
     /// On timeout every connection is closed anyway, and the call returns
     /// [`NexarError::ShutdownIncomplete`] naming the peers that did not finish.
+    /// A peer that answers with anything but the `DONE` byte, finishes or
+    /// resets its stream first, or loses the connection without closing it
+    /// also lands in that error.
     pub async fn shutdown_with_timeout(mut self, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         if let Some(monitor) = self._monitor_handle.take() {
@@ -139,26 +143,51 @@ impl NexarClient {
 
         let mut timed_out = Vec::new();
         let mut disconnected = Vec::new();
+        let mut bad_signal = Vec::new();
         for (rank, done) in results {
             match done {
                 Err(_) => timed_out.push(rank),
-                Ok(Err(e)) => {
+                Ok(Err(DoneError::Lost(e))) => {
                     tracing::warn!(peer = rank, "shutdown: peer disconnected first: {e}");
                     disconnected.push(rank);
+                }
+                Ok(Err(e @ DoneError::BadSignal(_))) => {
+                    tracing::warn!(peer = rank, "shutdown: {e}");
+                    bad_signal.push(rank);
                 }
                 Ok(Ok(())) => {}
             }
         }
-        if timed_out.is_empty() && disconnected.is_empty() {
+        if timed_out.is_empty() && disconnected.is_empty() && bad_signal.is_empty() {
             return Ok(());
         }
         timed_out.sort();
         disconnected.sort();
+        bad_signal.sort();
         Err(NexarError::ShutdownIncomplete {
             timed_out,
             disconnected,
+            bad_signal,
             timeout_ms: timeout.as_millis() as u64,
         })
+    }
+}
+
+/// Why a peer's `DONE` exchange did not complete.
+#[derive(Debug)]
+enum DoneError {
+    /// The connection was lost without an application close.
+    Lost(ConnectionError),
+    /// The peer answered, but not with exactly one `DONE` byte.
+    BadSignal(String),
+}
+
+impl std::fmt::Display for DoneError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DoneError::Lost(e) => write!(f, "connection lost: {e}"),
+            DoneError::BadSignal(detail) => write!(f, "bad DONE signal: {detail}"),
+        }
     }
 }
 
@@ -166,27 +195,45 @@ impl NexarClient {
 ///
 /// A peer that closes the connection with an application close code also counts
 /// as done: it closes only after its own `DONE` exchange or a deliberate drop.
-async fn exchange_done(conn: &quinn::Connection) -> std::result::Result<(), ConnectionError> {
+/// A wrong byte, a stream that finishes before the byte, and a reset stream
+/// are errors.
+async fn exchange_done(conn: &quinn::Connection) -> std::result::Result<(), DoneError> {
     let signal = async {
         let (mut send, _recv) = conn.open_bi().await?;
+        // A write or finish error means the connection closed. `answer`
+        // reports that close, so these results carry no extra information.
         let _ = send.write_all(&[DONE]).await;
         let _ = send.finish();
         // Keep `send` alive until the peer's answer arrives.
         Ok::<_, ConnectionError>(send)
     };
     let answer = async {
-        let (_send, mut recv) = conn.accept_bi().await?;
+        let (_send, mut recv) = conn.accept_bi().await.map_err(DoneError::Lost)?;
         let mut byte = [0u8; 1];
         match recv.read_exact(&mut byte).await {
-            Ok(()) => Ok(()),
-            Err(quinn::ReadExactError::ReadError(quinn::ReadError::ConnectionLost(e))) => Err(e),
-            Err(_) => Ok(()),
+            Ok(()) if byte[0] == DONE => Ok(()),
+            Ok(()) => Err(DoneError::BadSignal(format!(
+                "expected byte {DONE:#04x}, got {:#04x}",
+                byte[0]
+            ))),
+            Err(quinn::ReadExactError::ReadError(quinn::ReadError::ConnectionLost(e))) => {
+                Err(DoneError::Lost(e))
+            }
+            Err(quinn::ReadExactError::FinishedEarly(_)) => Err(DoneError::BadSignal(
+                "stream finished before the DONE byte".into(),
+            )),
+            Err(quinn::ReadExactError::ReadError(quinn::ReadError::Reset(code))) => Err(
+                DoneError::BadSignal(format!("stream reset with code {code}")),
+            ),
+            Err(quinn::ReadExactError::ReadError(e)) => {
+                Err(DoneError::BadSignal(format!("read error: {e}")))
+            }
         }
     };
     let (signaled, answered) = tokio::join!(signal, answer);
-    let result = answered.and(signaled.map(|_| ()));
+    let result = answered.and(signaled.map(|_| ()).map_err(DoneError::Lost));
     match result {
-        Err(ConnectionError::ApplicationClosed(_)) => Ok(()),
+        Err(DoneError::Lost(ConnectionError::ApplicationClosed(_))) => Ok(()),
         other => other,
     }
 }
@@ -233,6 +280,61 @@ mod tests {
             "{err}"
         );
         drop(c1);
+    }
+
+    /// A wrong answer rank 1 gives in place of its `DONE` byte.
+    enum BadAnswer {
+        WrongByte,
+        Reset,
+        FinishEarly,
+    }
+
+    /// Shut down rank 0 while rank 1 sends `answer` instead of calling `shutdown`.
+    async fn shutdown_against(answer: BadAnswer) -> NexarError {
+        let (c0, c1) = crate::client::bootstrap::local_pair_with(Default::default()).await;
+        let conn = c1.peers[&0].conn.clone();
+        let (mut send, _recv) = conn.open_bi().await.unwrap();
+        match answer {
+            BadAnswer::WrongByte => {
+                send.write_all(&[DONE ^ 0xFF]).await.unwrap();
+                send.finish().unwrap();
+            }
+            BadAnswer::Reset => send.reset(VarInt::from_u32(7)).unwrap(),
+            BadAnswer::FinishEarly => send.finish().unwrap(),
+        }
+        let err = c0
+            .shutdown_with_timeout(Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        drop(send);
+        drop(c1);
+        err
+    }
+
+    fn assert_bad_signal(err: &NexarError) {
+        assert!(
+            matches!(
+                err,
+                NexarError::ShutdownIncomplete { timed_out, disconnected, bad_signal, .. }
+                    if timed_out.is_empty() && disconnected.is_empty() && bad_signal == &[1]
+            ),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wrong_done_byte_is_an_error() {
+        assert_bad_signal(&shutdown_against(BadAnswer::WrongByte).await);
+    }
+
+    #[tokio::test]
+    async fn test_reset_done_stream_is_an_error() {
+        assert_bad_signal(&shutdown_against(BadAnswer::Reset).await);
+    }
+
+    #[tokio::test]
+    async fn test_early_finish_is_an_error() {
+        assert_bad_signal(&shutdown_against(BadAnswer::FinishEarly).await);
     }
 
     #[tokio::test]

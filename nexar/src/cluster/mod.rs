@@ -18,4 +18,4 @@ pub use recovery::{RecoveryEvent, RecoveryOrchestrator, RecoveryPolicy};
 pub use seed::{FormClusterResult, PendingJoin, SeedNode};
 pub use sparse::{RoutingTable, SpanningTree, TopologyStrategy};
 pub use topology::ClusterMap;
-pub use worker::WorkerNode;
+pub use worker::{NodeCredentials, WorkerNode};

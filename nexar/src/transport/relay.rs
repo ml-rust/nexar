@@ -92,101 +92,147 @@ impl RelayDeliveries {
     }
 }
 
+/// The routing context of one rank: its rank, its direct peers, and its routes.
+///
+/// Every relay send and forward needs all of them, so they travel together.
+#[derive(Clone, Copy)]
+pub struct RelayRoute<'a> {
+    /// This rank.
+    pub my_rank: Rank,
+    /// Direct peers of this rank.
+    pub peers: &'a HashMap<Rank, Arc<PeerConnection>>,
+    /// Next hop of every destination that is not a direct peer.
+    pub routing_table: &'a RoutingTable,
+    /// The topology, to pick an alternative hop.
+    pub strategy: &'a TopologyStrategy,
+    /// Number of ranks in the cluster.
+    pub world_size: u32,
+}
+
+impl RelayRoute<'_> {
+    /// The next hop toward `dest`, a rank that is not a direct peer.
+    fn next_hop(self, dest: Rank) -> Result<Rank> {
+        self.routing_table
+            .next_hop
+            .get(&dest)
+            .copied()
+            .ok_or(NexarError::UnknownPeer { rank: dest })
+    }
+
+    /// Send `relay` to `hop`. On error, retry once on `hop`, then try an
+    /// alternative hop toward `dest`.
+    ///
+    /// Returns the alternative hop that took the message, if one did. Returns
+    /// the first error when every attempt fails.
+    async fn send_with_failover(
+        self,
+        hop: Rank,
+        dest: Rank,
+        relay: &NexarMessage,
+        priority: Priority,
+    ) -> Result<Option<Rank>> {
+        let Err(first_err) = try_send_relay(self.peers, hop, relay, priority).await else {
+            return Ok(None);
+        };
+        // Retry once on the same hop (transient QUIC errors).
+        if try_send_relay(self.peers, hop, relay, priority)
+            .await
+            .is_ok()
+        {
+            return Ok(None);
+        }
+        if let Some(alt) =
+            find_alternative_hop(self.strategy, self.my_rank, dest, hop, self.world_size)
+            && try_send_relay(self.peers, alt, relay, priority)
+                .await
+                .is_ok()
+        {
+            return Ok(Some(alt));
+        }
+        Err(first_err)
+    }
+}
+
+/// The owned form of [`RelayRoute`], for relay listener tasks.
+#[derive(Clone)]
+pub struct RelayTopology {
+    /// This rank.
+    pub my_rank: Rank,
+    /// Direct peers of this rank.
+    pub peers: Arc<HashMap<Rank, Arc<PeerConnection>>>,
+    /// Next hop of every destination that is not a direct peer.
+    pub routing_table: Arc<RoutingTable>,
+    /// The topology, to pick an alternative hop.
+    pub strategy: TopologyStrategy,
+    /// Number of ranks in the cluster.
+    pub world_size: u32,
+}
+
+impl RelayTopology {
+    /// Borrow this topology as a [`RelayRoute`].
+    pub fn route(&self) -> RelayRoute<'_> {
+        RelayRoute {
+            my_rank: self.my_rank,
+            peers: &self.peers,
+            routing_table: &self.routing_table,
+            strategy: &self.strategy,
+            world_size: self.world_size,
+        }
+    }
+}
+
 /// Send a message to a destination rank, using relay if not a direct neighbor.
 ///
 /// If `dest` is a direct peer, sends normally. Otherwise wraps in a Relay message
 /// and sends to the next hop. On failure, retries once on the same hop, then
 /// attempts an alternative hop before returning an error.
-#[allow(clippy::too_many_arguments)]
 pub async fn send_or_relay_message(
-    my_rank: Rank,
-    peers: &HashMap<Rank, Arc<PeerConnection>>,
-    routing_table: &RoutingTable,
-    strategy: &TopologyStrategy,
-    world_size: u32,
+    route: RelayRoute<'_>,
     dest: Rank,
     msg: &NexarMessage,
     priority: Priority,
 ) -> Result<()> {
-    if let Some(peer) = peers.get(&dest) {
-        peer.send_message(msg, priority).await
-    } else {
-        let &next = routing_table
-            .next_hop
-            .get(&dest)
-            .ok_or(NexarError::UnknownPeer { rank: dest })?;
-        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(msg)
-            .map_err(|e| NexarError::EncodeFailed(e.to_string()))?;
-        let relay = NexarMessage::Relay {
-            src_rank: my_rank,
-            final_dest: dest,
-            tag: 0,
-            payload: payload.to_vec(),
-        };
-
-        if let Err(first_err) = try_send_relay(peers, next, &relay, priority).await {
-            // Retry once on the same hop (transient QUIC errors).
-            if try_send_relay(peers, next, &relay, priority).await.is_ok() {
-                return Ok(());
-            }
-            // Try alternative hop.
-            if let Some(alt) = find_alternative_hop(strategy, my_rank, dest, next, world_size)
-                && try_send_relay(peers, alt, &relay, priority).await.is_ok()
-            {
-                return Ok(());
-            }
-            return Err(first_err);
-        }
-        Ok(())
+    if let Some(peer) = route.peers.get(&dest) {
+        return peer.send_message(msg, priority).await;
     }
+    let next = route.next_hop(dest)?;
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(msg)
+        .map_err(|e| NexarError::EncodeFailed(e.to_string()))?;
+    let relay = NexarMessage::Relay {
+        src_rank: route.my_rank,
+        final_dest: dest,
+        tag: 0,
+        payload: payload.to_vec(),
+    };
+    route
+        .send_with_failover(next, dest, &relay, priority)
+        .await
+        .map(|_| ())
 }
 
 /// Send tagged data to a destination, using relay if not a direct neighbor.
 ///
 /// On failure, retries once on the same hop, then attempts an alternative hop.
-#[allow(clippy::too_many_arguments)]
 pub async fn send_or_relay_tagged(
-    my_rank: Rank,
-    peers: &HashMap<Rank, Arc<PeerConnection>>,
-    routing_table: &RoutingTable,
-    strategy: &TopologyStrategy,
-    world_size: u32,
+    route: RelayRoute<'_>,
     dest: Rank,
     tag: u64,
     data: &[u8],
 ) -> Result<()> {
-    if let Some(peer) = peers.get(&dest) {
-        peer.send_raw_tagged_best_effort(tag, data).await
-    } else {
-        let &next = routing_table
-            .next_hop
-            .get(&dest)
-            .ok_or(NexarError::UnknownPeer { rank: dest })?;
-        let relay = NexarMessage::Relay {
-            src_rank: my_rank,
-            final_dest: dest,
-            tag,
-            payload: data.to_vec(),
-        };
-
-        if let Err(first_err) = try_send_relay(peers, next, &relay, Priority::Bulk).await {
-            if try_send_relay(peers, next, &relay, Priority::Bulk)
-                .await
-                .is_ok()
-            {
-                return Ok(());
-            }
-            if let Some(alt) = find_alternative_hop(strategy, my_rank, dest, next, world_size)
-                && try_send_relay(peers, alt, &relay, Priority::Bulk)
-                    .await
-                    .is_ok()
-            {
-                return Ok(());
-            }
-            return Err(first_err);
-        }
-        Ok(())
+    if let Some(peer) = route.peers.get(&dest) {
+        return peer.send_raw_tagged_best_effort(tag, data).await;
     }
+    let next = route.next_hop(dest)?;
+    let relay = NexarMessage::Relay {
+        src_rank: route.my_rank,
+        final_dest: dest,
+        tag,
+        payload: data.to_vec(),
+    };
+    route
+        .send_with_failover(next, dest, &relay, Priority::Bulk)
+        .await
+        .map(|_| ())
 }
 
 /// Try to send a relay message to a specific hop.
@@ -207,13 +253,8 @@ async fn try_send_relay(
 /// For each direct neighbor, spawns a background task that reads Relay messages
 /// from that neighbor's relay lane. If the message is for this node, it's delivered
 /// locally. Otherwise, it's forwarded to the next hop.
-#[allow(clippy::too_many_arguments)]
 pub fn start_relay_listeners(
-    my_rank: Rank,
-    peers: Arc<HashMap<Rank, Arc<PeerConnection>>>,
-    routing_table: Arc<RoutingTable>,
-    strategy: TopologyStrategy,
-    world_size: u32,
+    topology: RelayTopology,
     relay_receivers: HashMap<Rank, mpsc::Receiver<NexarMessage>>,
     deliveries: Arc<RelayDeliveries>,
     pool: Arc<crate::transport::buffer_pool::BufferPool>,
@@ -222,13 +263,12 @@ pub fn start_relay_listeners(
     // Deliveries wait for room on tasks of their own, so one full key does
     // not hold up the other keys from the same neighbor.
     let pending = Arc::new(Semaphore::new(MAX_PENDING_DELIVERIES));
+    let my_rank = topology.my_rank;
 
     for (neighbor_rank, mut relay_rx) in relay_receivers {
-        let peers = Arc::clone(&peers);
-        let rt = Arc::clone(&routing_table);
+        let topology = topology.clone();
         let deliveries = Arc::clone(&deliveries);
         let pool = Arc::clone(&pool);
-        let strat = strategy.clone();
         let pending = Arc::clone(&pending);
 
         handles.push(tokio::spawn(async move {
@@ -268,17 +308,7 @@ pub fn start_relay_listeners(
                             });
                         }
                     } else {
-                        relay_forward(
-                            my_rank,
-                            neighbor_rank,
-                            final_dest,
-                            &msg,
-                            &peers,
-                            &rt,
-                            &strat,
-                            world_size,
-                        )
-                        .await;
+                        relay_forward(topology.route(), neighbor_rank, final_dest, &msg).await;
                     }
                 }
             }
@@ -289,58 +319,28 @@ pub fn start_relay_listeners(
 }
 
 /// Forward a relay message to the next hop with retry + alternative routing.
-#[allow(clippy::too_many_arguments)]
-async fn relay_forward(
-    my_rank: Rank,
-    from: Rank,
-    final_dest: Rank,
-    msg: &NexarMessage,
-    peers: &HashMap<Rank, Arc<PeerConnection>>,
-    rt: &RoutingTable,
-    strategy: &TopologyStrategy,
-    world_size: u32,
-) {
-    let Some(hop) = rt.route(final_dest) else {
+async fn relay_forward(route: RelayRoute<'_>, from: Rank, final_dest: Rank, msg: &NexarMessage) {
+    let Some(hop) = route.routing_table.route(final_dest) else {
         tracing::error!(dest = final_dest, "relay: no route to destination");
         return;
     };
-
-    // First attempt.
-    if try_send_relay(peers, hop, msg, Priority::Bulk)
+    match route
+        .send_with_failover(hop, final_dest, msg, Priority::Bulk)
         .await
-        .is_ok()
     {
-        return;
-    }
-
-    // Retry once on the same hop (transient error).
-    if try_send_relay(peers, hop, msg, Priority::Bulk)
-        .await
-        .is_ok()
-    {
-        return;
-    }
-
-    // Try alternative hop.
-    if let Some(alt) = find_alternative_hop(strategy, my_rank, final_dest, hop, world_size)
-        && try_send_relay(peers, alt, msg, Priority::Bulk)
-            .await
-            .is_ok()
-    {
-        tracing::info!(
+        Ok(None) => {}
+        Ok(Some(alt)) => tracing::info!(
             from,
             failed_hop = hop,
             alt_hop = alt,
             dest = final_dest,
             "relay: forwarded via alternative hop"
-        );
-        return;
+        ),
+        Err(e) => tracing::error!(
+            from,
+            via = hop,
+            dest = final_dest,
+            "relay: forward failed after retry and alternative hop: {e}"
+        ),
     }
-
-    tracing::error!(
-        from,
-        via = hop,
-        dest = final_dest,
-        "relay: forward failed after retry and alternative hop"
-    );
 }

@@ -319,6 +319,8 @@ impl NexarClient {
     /// # Safety
     /// - `ptr` must remain valid until the handle is awaited.
     /// - `residual` must remain valid and exclusively borrowed until the handle is awaited.
+    // Mirrors `all_reduce_compressed`, with the residual as a raw pointer and
+    // length because the spawned task outlives any borrow.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn all_reduce_compressed_nb(
         self: &Arc<Self>,

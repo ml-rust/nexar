@@ -7,13 +7,21 @@
 - Wire protocol version 2 (`PROTOCOL_VERSION = 2`). A v1 node cannot join a v2 seed, and the seed rejects it.
 - `NexarMessage::Hello` has a new `requested_rank: Option<Rank>` field. `listen_addr` now holds an IP address, not a socket address.
 - `NexarMessage::Welcome` has a new `observed_addr` field. During formation its `peers` list is empty: the `PeerTable` message carries the peer addresses.
-- New messages: `MeshListen`, `PeerTable`, `Abort`, `PeerHello`, `PeerHelloAck`. A `match` on `NexarMessage` needs arms for them. A `match` on `NexarError` needs an arm for `FrameTooLarge`.
+- New messages: `MeshListen`, `PeerTable`, `Abort`, `PeerHello`, `PeerHelloAck`. A `match` on `NexarMessage` needs arms for them.
+- `NexarError` gains `FrameTooLarge`, `RankConflict`, `JoinTimeout`, `ShutdownIncomplete`, `BootstrapAborted`, and `TokenRequired`. An exhaustive `match` on `NexarError` stops compiling.
+- `NexarError`, `AbortReason`, `NexarMessage`, `LaneKey`, and `ControlKey` are `#[non_exhaustive]`. A `match` outside nexar needs a wildcard arm. New variants no longer break such a `match`.
+- `NexarConfig` gains the public fields `max_frame_bytes`, `recv_queue_depth`, and `recv_inflight_bytes`. A struct literal that lists every field stops compiling: end it with `..NexarConfig::default()`.
+- `tcp_bulk_connect` and `tcp_bulk_connect_tls` take a `max_frame_bytes` argument.
+- Every receive names the source rank first, as `recv(ptr, size, src, tag)` does: `PeerRouter::recv_lane(rank, LaneKey)`, `PeerRouter::recv_control(rank, ControlKey)`, `RelayDeliveries::recv_control(src, ControlKey)`, and `RelayDeliveries::recv_data(src, tag)`.
+- `SeedNode::bind_local` and `SeedNode::bind_with_token` return `TokenRequired` for a non-loopback address without a token. Before, `bind_local("0.0.0.0:7000")` let any host join and get a leaf certificate. An empty token counts as no token.
+- `SeedNode::bind` no longer logs its generated token. Read it with `SeedNode::cluster_token`.
+- `send_or_relay_message` and `send_or_relay_tagged` take a `RelayRoute` in place of the rank, peers, routing table, strategy, and world size. `start_relay_listeners` takes a `RelayTopology`.
+- `ElasticManager::new` takes a `NodeCredentials` in place of three `Vec<u8>` arguments.
 - `SeedNode::form_cluster` now runs the whole formation: join, mesh address exchange, and ready barrier. A `WorkerNode::connect` caller that does not form the mesh stalls the seed until its timeout. Use `NexarClient::bootstrap_join`.
 - `WorkerNode` has private fields and closes its seed connection on drop. Code outside nexar can no longer construct it.
 - Bootstrap-time leaf certificates name `localhost`, the advertised IP, and the observed IP. Mesh connections verify the certificate against the dialed IP.
 - Byte streams use a new wire format under protocol version 2: stream type `0x05` carries lane kind, `comm_id`, tag, a per-connection sequence number, and length. Type `0x06` is a skip notice. Types `0x02`, `0x03`, and `0x04` are gone, and point-to-point `send` no longer sends a framed `NexarMessage::Data` to a direct peer.
-- `PeerRouter`: the public fields `rpc_requests`, `control`, `data`, `raw`, and `relay` are private. `recv_data`, `recv_raw`, `register_comm`, `register_tag`, and `remove_tag` are gone: use `recv_lane(LaneKey, rank)`. `recv_control` takes a `ControlKey`. `take_relay_rx` returns `None` once taken.
-- `RelayDeliveries::recv_control` takes a `ControlKey`.
+- `PeerRouter`: the public fields `rpc_requests`, `control`, `data`, `raw`, and `relay` are private. `recv_data`, `recv_raw`, `register_comm`, `register_tag`, and `remove_tag` are gone: use `recv_lane(rank, LaneKey)`. `recv_control` takes `(rank, ControlKey)`. `take_relay_rx` returns `None` once taken.
 - Tagged sends of a split or rebuilt communicator use that communicator's own tag space, on QUIC and on the TCP sidecar. Before, they shared the root communicator's tags.
 
 ### Added
@@ -24,13 +32,16 @@
 - `LaneKey`, `ControlKey`, `PeerRouter::spawn_with_limits`, `RouterLimits`, `PeerRouter::recv_lane`, `RelayDeliveries::recv_data`, `PeerConnection::send_lane`, and `PeerConnection::send_lane_best_effort`.
 - `NexarClient::bootstrap_seed`, `bootstrap_seed_with`, and `bootstrap_join`: one process per rank, across hosts.
 - `ClusterConfig`: world size, bind and advertise addresses, requested rank, cluster token, join timeout, and the client's `NexarConfig`.
-- `SeedNode::from_config`, `SeedNode::bind_with_token`, and `SeedNode::world_size`.
-- Errors `RankConflict`, `JoinTimeout`, `BootstrapAborted`, and `TokenRequired`. `AbortReason` carries a formation failure to every rank.
-- `tcp_bulk_accept_stream`: build a sidecar from an accepted `TcpStream`.
+- `SeedNode::from_config`, `SeedNode::bind_with_token`, `SeedNode::world_size`, and `SeedNode::cluster_token`.
+- `NodeCredentials` and `WorkerNode::credentials`: the mTLS credentials a rank receives from the seed.
+- `RelayRoute` and `RelayTopology`: the routing context of relay sends and relay listeners.
+- `AbortReason` carries a formation failure to every rank.
+- `tcp_bulk_accept_stream(stream, tls, max_frame_bytes)`: build a sidecar from an accepted `TcpStream`.
 - `NexarConfig::max_frame_bytes` (env `NEXAR_MAX_FRAME_BYTES`, default 4 GiB, the QUIC router's message limit): the largest TCP bulk sidecar frame a rank accepts. A longer frame closes the sidecar, and receivers get the new `NexarError::FrameTooLarge`. Set the same value on every rank.
 - `TcpBulkTransport::from_stream_with_limit` and `from_split_with_limit`.
 - The `seed_worker` example runs one process per rank.
-- `NexarClient::shutdown` and `shutdown_with_timeout`: flush sidecars, exchange a done signal with every direct peer, then close. Data sent before the call reaches every peer that is still running. A timeout returns the new `ShutdownIncomplete` error. Call it on every rank before exit.
+- `NexarClient::shutdown` and `shutdown_with_timeout`: flush sidecars, exchange a `DONE` byte (`0xD0`) with every direct peer, then close. Each rank waits for the peer's `DONE` byte or a deliberate close. Data sent before the call reaches every peer that is still running. A timeout returns the new `ShutdownIncomplete` error. A wrong byte, a stream finished before the byte, or a reset stream also returns it, with the peer in `bad_signal`. Call it on every rank before exit.
+- `nexar-rdma` and `nexar-nccl` document shutdown: drop every holder of an `Arc<NexarClient>`, such as a `HierarchicalComm`, then call `Arc::into_inner` and `shutdown`.
 - `BulkTransport::shutdown`, default no-op. `TcpBulkTransport` flushes, sends TLS `close_notify`, and sends FIN.
 
 ### Changed
@@ -44,7 +55,6 @@
 - TCP bulk sidecars use mTLS with the cluster certificates. In sparse topologies, sidecars connect neighbors only. A sidecar config mismatch between two ranks fails formation.
 - Dropping the last client that shares a mesh (root, split, and rebuilt clients share one) closes its connections at once. Before, router tasks kept dropped connections open.
 - A worker closes its seed connection explicitly on every exit path, so the seed no longer waits for acknowledgements that never come on abort paths.
-- `tcp_bulk_connect`, `tcp_bulk_connect_tls`, and `tcp_bulk_accept_stream` take a `max_frame_bytes` argument.
 - Client endpoints bind the wildcard address of the seed's or peer's address family instead of loopback.
 
 ### Fixed
@@ -58,8 +68,7 @@
 - Split and rebuilt communicators failed tagged receives and barriers with `UnknownPeer` when the TCP sidecar was off: they had no routers. They now share the parent's routers.
 - A grown communicator in a sparse topology replaced the relay deliveries the parent's relay listeners still fill.
 - The router queued received heartbeats on the control lane, so a barrier that ran after a heartbeat failed with an unexpected message. Received heartbeats are now dropped.
-
-- `SeedNode::bind` without `NEXAR_CLUSTER_TOKEN` logged a hex token that workers could not use. The seed now checks the logged hex string.
+- `SeedNode::bind` without `NEXAR_CLUSTER_TOKEN` logged its generated token at warn level, so the secret reached every log sink. The seed no longer logs it.
 - `TcpBulkTransport` lost a frame when it arrived while a receiver for its tag registered, and two concurrent receivers for one tag could orphan one of them.
 - Sparse topologies with the TCP bulk sidecar enabled failed to bootstrap.
 - A bootstrap control frame announcing a huge payload no longer allocates that payload.

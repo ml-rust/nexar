@@ -16,10 +16,15 @@
 //! use nexar_rdma::ext::PeerConnectionRdmaExt;
 //!
 //! // After bootstrap, each rank calls establish_rdma_mesh:
-//! nexar_rdma::bootstrap::establish_rdma_mesh(&client).await;
+//! nexar_rdma::bootstrap::establish_rdma_mesh(&client).await?;
 //!
 //! // Send via RDMA with QUIC fallback:
 //! peer.send_raw_rdma(data).await?;
+//!
+//! // After the last transfer, every rank shuts down. `shutdown` takes the
+//! // client by value: drop every `Arc<NexarClient>` clone first, then use
+//! // `Arc::into_inner`.
+//! client.shutdown().await?;
 //! ```
 
 pub mod bootstrap;

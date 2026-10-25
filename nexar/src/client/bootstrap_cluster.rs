@@ -3,7 +3,7 @@
 use crate::client::NexarClient;
 use crate::client::bootstrap_mesh::{MeshAddrs, join_mesh};
 use crate::cluster::worker::JoinRequest;
-use crate::cluster::{ClusterConfig, SeedNode, WorkerNode};
+use crate::cluster::{ClusterConfig, NodeCredentials, SeedNode, WorkerNode};
 use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -12,13 +12,6 @@ use std::time::Duration;
 
 /// How long the seed process waits for its seed to abort the others after its own join fails.
 const SEED_WIND_DOWN: Duration = Duration::from_secs(10);
-
-/// mTLS credentials a rank received from the seed.
-pub(super) struct Credentials {
-    pub ca_cert: Vec<u8>,
-    pub node_cert: Vec<u8>,
-    pub node_key: Vec<u8>,
-}
 
 impl NexarClient {
     /// Bootstrap rank 0 of a multi-process cluster.
@@ -120,7 +113,7 @@ pub(super) async fn join_cluster(
     cfg: &ClusterConfig,
     token: Option<Vec<u8>>,
     adapter: Arc<dyn DeviceAdapter>,
-) -> Result<(NexarClient, Credentials)> {
+) -> Result<(NexarClient, NodeCredentials)> {
     let req = JoinRequest {
         token,
         requested_rank: cfg.requested_rank,
@@ -139,11 +132,7 @@ pub(super) async fn join_cluster(
         worker.close().await;
         return Err(err);
     }
-    let creds = Credentials {
-        ca_cert: worker.ca_cert.clone(),
-        node_cert: worker.node_cert.clone(),
-        node_key: worker.node_key.clone(),
-    };
+    let creds = worker.credentials();
     let addrs = MeshAddrs {
         bind: cfg.bind_addr,
         advertise: cfg.advertise_addr,

@@ -71,7 +71,7 @@ impl NexarClient {
 
     /// Receive the control message with key `key` from a direct peer.
     pub(crate) async fn recv_control(&self, src: Rank, key: ControlKey) -> Result<NexarMessage> {
-        self.router(src)?.recv_control(key, src).await
+        self.router(src)?.recv_control(src, key).await
     }
 
     /// Receive the next RPC request from the rpc_requests lane for a given peer.
@@ -165,7 +165,7 @@ impl NexarClient {
             comm_id: self.comm_id,
             tag,
         };
-        self.router(src)?.recv_lane(lane, src).await
+        self.router(src)?.recv_lane(src, lane).await
     }
 
     /// Send non-contiguous data (scatter-gather) to a specific rank.
@@ -222,17 +222,14 @@ impl NexarClient {
         if let Some(peer) = self.peers.get(&dest) {
             peer.send_message(msg, priority).await
         } else if let Some(ref rt) = self.routing_table {
-            crate::transport::relay::send_or_relay_message(
-                self.rank,
-                &self.peers,
-                rt,
-                &self.config.topology,
-                self.world_size,
-                dest,
-                msg,
-                priority,
-            )
-            .await
+            let route = crate::transport::relay::RelayRoute {
+                my_rank: self.rank,
+                peers: &self.peers,
+                routing_table: rt,
+                strategy: &self.config.topology,
+                world_size: self.world_size,
+            };
+            crate::transport::relay::send_or_relay_message(route, dest, msg, priority).await
         } else {
             Err(NexarError::UnknownPeer { rank: dest })
         }
@@ -248,7 +245,7 @@ impl NexarClient {
         let original_src = self.resolve_rank(src);
         if let Some(router) = self.routers.get(&original_src) {
             // Direct peer: use router.
-            router.recv_control(key, src).await
+            router.recv_control(src, key).await
         } else if let Some(ref deliveries) = self.relay_deliveries {
             // Non-neighbor: receive via relay.
             deliveries.recv_control(original_src, key).await
@@ -282,12 +279,15 @@ impl NexarClient {
         // Convert peers to Arc<HashMap> for the relay listener.
         let peers_arc = Arc::new(self.peers.clone());
 
-        let handles = crate::transport::relay::start_relay_listeners(
-            self.rank,
-            peers_arc,
+        let topology = crate::transport::relay::RelayTopology {
+            my_rank: self.rank,
+            peers: peers_arc,
             routing_table,
-            self.config.topology.clone(),
-            self.world_size,
+            strategy: self.config.topology.clone(),
+            world_size: self.world_size,
+        };
+        let handles = crate::transport::relay::start_relay_listeners(
+            topology,
             relay_receivers,
             deliveries,
             Arc::clone(&self._pool),
