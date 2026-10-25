@@ -26,7 +26,7 @@ const MAX_MESSAGE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 ///
 /// - **`rpc_requests`** (`Rpc` variants)
 /// - **`rpc_responses`** — keyed by `req_id`
-/// - **`control`** (Barrier, BarrierAck, Heartbeat, etc.)
+/// - **`control`** (Barrier, BarrierAck, recovery and elastic messages; heartbeats are dropped)
 /// - **`data`** (`Data` variants)
 /// - **`raw`** — raw byte streams (default comm_id 0)
 /// - **`raw_comms`** — per-comm_id raw byte streams (for split communicators)
@@ -376,11 +376,15 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) -> Result<()> {
         }
         NexarMessage::Barrier { .. }
         | NexarMessage::BarrierAck { .. }
-        | NexarMessage::Heartbeat { .. }
         | NexarMessage::NodeJoined { .. }
         | NexarMessage::NodeLeft { .. }
         | NexarMessage::Hello { .. }
         | NexarMessage::Welcome { .. }
+        | NexarMessage::MeshListen { .. }
+        | NexarMessage::PeerTable { .. }
+        | NexarMessage::Abort { .. }
+        | NexarMessage::PeerHello { .. }
+        | NexarMessage::PeerHelloAck { .. }
         | NexarMessage::RdmaEndpoint { .. }
         | NexarMessage::SplitRequest { .. }
         | NexarMessage::RecoveryVote { .. }
@@ -391,6 +395,9 @@ async fn dispatch_framed(msg: NexarMessage, tx: &RouterSenders) -> Result<()> {
                 return Err(NexarError::PeerDisconnected { rank: tx.rank });
             }
         }
+        // Liveness comes from send success, so a received heartbeat carries no
+        // information. Queueing it would hand barriers an unexpected message.
+        NexarMessage::Heartbeat { .. } => {}
         NexarMessage::Data { .. } => {
             if tx.data.send(msg).await.is_err() {
                 return Err(NexarError::PeerDisconnected { rank: tx.rank });

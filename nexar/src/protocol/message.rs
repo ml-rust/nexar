@@ -1,3 +1,4 @@
+use crate::protocol::AbortReason;
 use crate::types::Rank;
 
 /// Control messages exchanged between nexar nodes.
@@ -14,9 +15,11 @@ pub enum NexarMessage {
         /// Pre-shared cluster token for bootstrap authentication.
         /// Empty = no authentication required.
         cluster_token: Vec<u8>,
-        /// Mesh listener address advertised by this node.
-        /// Empty string means seed should use `conn.remote_address()` as fallback.
+        /// IP address this node advertises for its mesh listener.
+        /// Empty: the seed uses the address it observes on this connection.
         listen_addr: String,
+        /// Rank this node asks for. `None`: the seed assigns one in arrival order.
+        requested_rank: Option<Rank>,
     },
 
     /// Seed's response with rank assignment, peer list, and mTLS credentials.
@@ -31,7 +34,29 @@ pub enum NexarMessage {
         node_cert: Vec<u8>,
         /// DER-encoded private key for this node's leaf certificate.
         node_key: Vec<u8>,
+        /// The worker's IP address as the seed observes it.
+        observed_addr: String,
     },
+
+    /// Worker to seed: the mesh listener address of `rank` is `addr`.
+    MeshListen { rank: Rank, addr: String },
+
+    /// Seed to workers: every rank's mesh address. Sent once all ranks report.
+    PeerTable { peers: Vec<(Rank, String)> },
+
+    /// Stop cluster formation. Either side can send it on a bootstrap stream.
+    Abort { reason: AbortReason },
+
+    /// Mesh connector to acceptor: the connector's rank and its TCP sidecar
+    /// listener. An empty `sidecar_addr` means the connector runs no sidecar.
+    PeerHello {
+        rank: Rank,
+        sidecar_addr: String,
+        sidecar_tls: bool,
+    },
+
+    /// Mesh acceptor to connector: confirms the acceptor's rank.
+    PeerHelloAck { rank: Rank },
 
     /// Barrier request: all ranks must reach this epoch before proceeding.
     Barrier { epoch: u64, comm_id: u64 },
@@ -124,6 +149,7 @@ mod tests {
             capabilities: 0xFF,
             cluster_token: vec![],
             listen_addr: String::new(),
+            requested_rank: Some(2),
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
         let deserialized: NexarMessage =
@@ -140,6 +166,7 @@ mod tests {
             ca_cert: vec![1, 2, 3],
             node_cert: vec![4, 5, 6],
             node_key: vec![7, 8, 9],
+            observed_addr: "10.0.0.3".into(),
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&msg).unwrap();
         let deserialized: NexarMessage =
@@ -155,6 +182,7 @@ mod tests {
                 capabilities: 0,
                 cluster_token: vec![],
                 listen_addr: String::new(),
+                requested_rank: None,
             },
             NexarMessage::Welcome {
                 rank: 0,
@@ -163,7 +191,27 @@ mod tests {
                 ca_cert: vec![10],
                 node_cert: vec![20],
                 node_key: vec![30],
+                observed_addr: String::new(),
             },
+            NexarMessage::MeshListen {
+                rank: 1,
+                addr: "10.0.0.2:7000".into(),
+            },
+            NexarMessage::PeerTable {
+                peers: vec![(0, "10.0.0.1:7000".into())],
+            },
+            NexarMessage::Abort {
+                reason: AbortReason::FormationTimeout {
+                    joined: 1,
+                    expected: 2,
+                },
+            },
+            NexarMessage::PeerHello {
+                rank: 0,
+                sidecar_addr: "10.0.0.1:7001".into(),
+                sidecar_tls: true,
+            },
+            NexarMessage::PeerHelloAck { rank: 1 },
             NexarMessage::Barrier {
                 epoch: 42,
                 comm_id: 0,

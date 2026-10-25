@@ -116,7 +116,7 @@ impl NexarClient {
             // The parent's relay listeners are still running and deliver to these channels.
             relay_deliveries: self.relay_deliveries.clone(),
             _relay_handles: Vec::new(),
-            _endpoints: Vec::new(),
+            mesh: Arc::clone(&self.mesh),
         })
     }
 }

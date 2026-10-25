@@ -66,6 +66,7 @@ impl NexarClient {
         let mut new_router_handles = Vec::new();
         for (rank, peer) in new_peers {
             let conn_clone = peer.conn.clone();
+            self.mesh.add_conn(peer.conn.clone());
             let (router, handle) = PeerRouter::spawn(rank, conn_clone, Arc::clone(&self._pool));
             let rx = router.register_comm(new_comm_id).await;
             comm_receivers.insert(rank, Mutex::new(rx));
@@ -113,7 +114,7 @@ impl NexarClient {
             routing_table: routing_table.clone(),
             relay_deliveries,
             _relay_handles: Vec::new(),
-            _endpoints: Vec::new(),
+            mesh: Arc::clone(&self.mesh),
         };
 
         // Set up relay listeners for new peer routers in sparse topologies.

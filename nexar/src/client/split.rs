@@ -177,7 +177,7 @@ impl NexarClient {
             routing_table: self.routing_table.clone(),
             relay_deliveries: self.relay_deliveries.clone(),
             _relay_handles: Vec::new(), // Split clients share the parent's relay
-            _endpoints: Vec::new(),
+            mesh: Arc::clone(&self.mesh),
         })
     }
 }

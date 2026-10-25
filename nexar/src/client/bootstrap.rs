@@ -1,40 +1,34 @@
 use crate::client::NexarClient;
-use crate::client::bootstrap_mesh::{
-    establish_connections, establish_tcp_sidecars, prepare_tls_infra,
-};
-use crate::cluster::PendingJoin;
+use crate::client::bootstrap_cluster::{Credentials, join_cluster};
 use crate::cluster::elastic::{ElasticBootstrap, ElasticConfig, ElasticManager};
-use crate::cluster::sparse::{TopologyStrategy, build_neighbors, build_routing_table};
-use crate::cluster::{SeedNode, WorkerNode};
+use crate::cluster::{ClusterConfig, FormClusterResult, PendingJoin, SeedNode};
 use crate::config::NexarConfig;
 use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
-use crate::types::Rank;
-use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 impl NexarClient {
     /// Bootstrap a cluster: start a seed node and connect workers.
     ///
-    /// This is a convenience for tests and simple deployments where
-    /// all nodes run in the same process (each as a tokio task).
+    /// All ranks run in this process, each as a tokio task, on loopback. Ranks
+    /// form the mesh through the same per-rank path as
+    /// [`NexarClient::bootstrap_join`]. Uses [`NexarConfig::from_env`].
     pub async fn bootstrap_local(
         world_size: u32,
         adapter: Arc<dyn DeviceAdapter>,
     ) -> Result<Vec<NexarClient>> {
-        let workers = spawn_seed_and_workers(world_size).await?;
-        build_mesh(workers, adapter).await
+        Self::bootstrap_local_with_config(world_size, adapter, NexarConfig::from_env()).await
     }
 
     /// Like [`NexarClient::bootstrap_local`], but with a custom configuration.
     pub async fn bootstrap_local_with_config(
         world_size: u32,
         adapter: Arc<dyn DeviceAdapter>,
-        config: crate::config::NexarConfig,
+        config: NexarConfig,
     ) -> Result<Vec<NexarClient>> {
-        let workers = spawn_seed_and_workers(world_size).await?;
-        build_mesh_with_config(workers, adapter, config).await
+        let local = form_local(world_size, adapter, config).await?;
+        Ok(local.members.into_iter().map(|(c, _)| c).collect())
     }
 
     /// Bootstrap a cluster with elastic scaling support.
@@ -44,67 +38,39 @@ impl NexarClient {
         nexar_config: NexarConfig,
         adapter: Arc<dyn DeviceAdapter>,
     ) -> Result<ElasticBootstrap> {
-        let seed_addr: SocketAddr = "127.0.0.1:0".parse().expect("hardcoded socket addr");
-        let seed = SeedNode::bind_local(seed_addr, initial_world)?;
-        let seed_addr = seed.local_addr();
-
-        let seed = Arc::new(seed);
-        let seed_for_formation = Arc::clone(&seed);
-        let seed_handle = tokio::spawn(async move { seed_for_formation.form_cluster().await });
-
-        let mut worker_handles = Vec::new();
-        for _ in 0..initial_world {
-            worker_handles.push(tokio::spawn(WorkerNode::connect(seed_addr)));
-        }
-
-        let seed_result = seed_handle
-            .await
-            .map_err(|e| NexarError::transport_with_source("seed task panicked", e))??;
-
-        let mut workers: Vec<WorkerNode> = Vec::new();
-        for h in worker_handles {
-            workers.push(
-                h.await
-                    .map_err(|e| NexarError::transport_with_source("worker task panicked", e))??,
-            );
-        }
-
-        // Save credentials before building mesh.
-        let creds: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = workers
-            .iter()
-            .map(|w| (w.ca_cert.clone(), w.node_cert.clone(), w.node_key.clone()))
-            .collect();
-
-        let clients = build_mesh_with_config(workers, adapter, nexar_config.clone()).await?;
+        let local = form_local(initial_world, adapter, nexar_config.clone()).await?;
+        let seed_addr = local.seed.local_addr();
 
         let pending_joins = Arc::new(std::sync::Mutex::new(Vec::<PendingJoin>::new()));
-
-        let ca = Arc::new(seed_result.ca);
-        let next_rank = Arc::new(std::sync::atomic::AtomicU32::new(seed_result.next_rank));
-        let cluster_map = Arc::new(std::sync::Mutex::new(seed_result.map));
+        let ca = Arc::new(local.formed.ca);
+        let next_rank = Arc::new(std::sync::atomic::AtomicU32::new(local.formed.next_rank));
+        let cluster_map = Arc::new(std::sync::Mutex::new(local.formed.map));
         let max_world = elastic_config.max_world_size;
 
         let pj = Arc::clone(&pending_joins);
-        let ca2 = Arc::clone(&ca);
-        let nr = Arc::clone(&next_rank);
-        let cm = Arc::clone(&cluster_map);
+        let seed = local.seed;
         tokio::spawn(async move {
-            let _ = seed.accept_elastic(ca2, nr, max_world, pj, cm).await;
+            let _ = seed
+                .accept_elastic(ca, next_rank, max_world, pj, cluster_map)
+                .await;
         });
 
-        let mut managers = Vec::new();
-        for (client, (ca_cert, node_cert, node_key)) in clients.into_iter().zip(creds) {
-            managers.push(ElasticManager::new(
-                client,
-                elastic_config.clone(),
-                nexar_config.clone(),
-                ca_cert,
-                node_cert,
-                node_key,
-                Arc::clone(&pending_joins),
-                Some(seed_addr),
-            ));
-        }
+        let managers = local
+            .members
+            .into_iter()
+            .map(|(client, creds)| {
+                ElasticManager::new(
+                    client,
+                    elastic_config.clone(),
+                    nexar_config.clone(),
+                    creds.ca_cert,
+                    creds.node_cert,
+                    creds.node_key,
+                    Arc::clone(&pending_joins),
+                    Some(seed_addr),
+                )
+            })
+            .collect();
 
         Ok(ElasticBootstrap {
             managers,
@@ -113,203 +79,52 @@ impl NexarClient {
     }
 }
 
-/// Spawn seed + workers and collect the worker nodes.
-async fn spawn_seed_and_workers(world_size: u32) -> Result<Vec<WorkerNode>> {
-    let seed_addr: SocketAddr = "127.0.0.1:0".parse().expect("hardcoded socket addr");
-    let seed = SeedNode::bind_local(seed_addr, world_size)?;
+/// An in-process cluster: the seed, its formation result, and every rank in rank order.
+struct LocalCluster {
+    seed: Arc<SeedNode>,
+    formed: FormClusterResult,
+    members: Vec<(NexarClient, Credentials)>,
+}
+
+/// Run a loopback seed and `world_size` ranks as tasks of this runtime.
+async fn form_local(
+    world_size: u32,
+    adapter: Arc<dyn DeviceAdapter>,
+    config: NexarConfig,
+) -> Result<LocalCluster> {
+    let loopback = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0);
+    let seed = Arc::new(SeedNode::bind_local(loopback, world_size)?);
     let seed_addr = seed.local_addr();
+    let forming = Arc::clone(&seed);
+    let seed_task = tokio::spawn(async move { forming.form_cluster().await });
 
-    let seed_handle = tokio::spawn(async move { seed.form_cluster().await });
+    let cfg = ClusterConfig::new(world_size)
+        .with_bind_addr(loopback)
+        .with_nexar(config);
+    let rank_tasks: Vec<_> = (0..world_size)
+        .map(|_| {
+            let cfg = cfg.clone();
+            let adapter = Arc::clone(&adapter);
+            tokio::spawn(async move { join_cluster(seed_addr, &cfg, None, adapter).await })
+        })
+        .collect();
 
-    let mut worker_handles = Vec::new();
-    for _ in 0..world_size {
-        worker_handles.push(tokio::spawn(WorkerNode::connect(seed_addr)));
-    }
-
-    let _seed_result = seed_handle
+    let formed = seed_task
         .await
         .map_err(|e| NexarError::transport_with_source("seed task panicked", e))??;
-
-    let mut workers: Vec<WorkerNode> = Vec::new();
-    for h in worker_handles {
-        workers.push(
-            h.await
-                .map_err(|e| NexarError::transport_with_source("worker task panicked", e))??,
+    let mut members = Vec::with_capacity(rank_tasks.len());
+    for task in rank_tasks {
+        members.push(
+            task.await
+                .map_err(|e| NexarError::transport_with_source("rank task panicked", e))??,
         );
     }
-
-    Ok(workers)
-}
-
-/// Establish a full mesh of P2P connections between workers using mutual TLS.
-async fn build_mesh(
-    workers: Vec<WorkerNode>,
-    adapter: Arc<dyn DeviceAdapter>,
-) -> Result<Vec<NexarClient>> {
-    let n = workers.len();
-    if n == 1 {
-        let w = workers
-            .into_iter()
-            .next()
-            .expect("workers vec confirmed non-empty by n==1 check");
-        return Ok(vec![NexarClient::new(
-            w.rank,
-            w.world_size,
-            HashMap::new(),
-            adapter,
-        )]);
-    }
-
-    let pairs: Vec<(usize, usize)> = (0..n)
-        .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
-        .collect();
-
-    let (listeners, listen_addrs, client_configs) = prepare_tls_infra(&workers)?;
-    let (all_peers, all_endpoints) =
-        establish_connections(&workers, &pairs, &listen_addrs, &client_configs, &listeners).await?;
-
-    let mut clients = Vec::new();
-    for (idx, (peers, endpoints)) in all_peers.into_iter().zip(all_endpoints).enumerate() {
-        let mut client = NexarClient::new(
-            workers[idx].rank,
-            workers[idx].world_size,
-            peers,
-            Arc::clone(&adapter),
-        );
-        client._endpoints = endpoints;
-        clients.push(client);
-    }
-
-    clients.sort_by_key(|c| c.rank());
-    establish_tcp_sidecars(&clients).await?;
-    Ok(clients)
-}
-
-/// Like [`build_mesh`], but with a custom configuration for each client.
-async fn build_mesh_with_config(
-    workers: Vec<WorkerNode>,
-    adapter: Arc<dyn DeviceAdapter>,
-    config: crate::config::NexarConfig,
-) -> Result<Vec<NexarClient>> {
-    let is_sparse = !matches!(config.topology, TopologyStrategy::FullMesh);
-
-    if is_sparse {
-        return build_sparse_mesh_with_config(workers, adapter, config).await;
-    }
-
-    let n = workers.len();
-    if n == 1 {
-        let w = workers
-            .into_iter()
-            .next()
-            .expect("workers vec confirmed non-empty by n==1 check");
-        return Ok(vec![NexarClient::new_with_config(
-            w.rank,
-            w.world_size,
-            HashMap::new(),
-            adapter,
-            crate::transport::buffer_pool::PoolProfile::Training,
-            config,
-        )]);
-    }
-
-    let pairs: Vec<(usize, usize)> = (0..n)
-        .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
-        .collect();
-
-    let (listeners, listen_addrs, client_configs) = prepare_tls_infra(&workers)?;
-    let (all_peers, all_endpoints) =
-        establish_connections(&workers, &pairs, &listen_addrs, &client_configs, &listeners).await?;
-
-    let mut clients = Vec::new();
-    for (idx, (peers, endpoints)) in all_peers.into_iter().zip(all_endpoints).enumerate() {
-        let mut client = NexarClient::new_with_config(
-            workers[idx].rank,
-            workers[idx].world_size,
-            peers,
-            Arc::clone(&adapter),
-            crate::transport::buffer_pool::PoolProfile::Training,
-            config.clone(),
-        );
-        client._endpoints = endpoints;
-        clients.push(client);
-    }
-
-    clients.sort_by_key(|c| c.rank());
-    establish_tcp_sidecars(&clients).await?;
-    Ok(clients)
-}
-
-/// Build a sparse mesh where each node only connects to its neighbors.
-async fn build_sparse_mesh_with_config(
-    workers: Vec<WorkerNode>,
-    adapter: Arc<dyn DeviceAdapter>,
-    config: crate::config::NexarConfig,
-) -> Result<Vec<NexarClient>> {
-    let n = workers.len();
-    let world_size = n as u32;
-
-    if n == 1 {
-        let w = workers
-            .into_iter()
-            .next()
-            .expect("workers vec confirmed non-empty by n==1 check");
-        return Ok(vec![NexarClient::new_with_config(
-            w.rank,
-            w.world_size,
-            HashMap::new(),
-            adapter,
-            crate::transport::buffer_pool::PoolProfile::Training,
-            config,
-        )]);
-    }
-
-    // Compute neighbor sets for all ranks.
-    let neighbor_sets: Vec<HashSet<Rank>> = workers
-        .iter()
-        .map(|w| build_neighbors(&config.topology, w.rank, world_size))
-        .collect();
-
-    // Determine which (i, j) pairs need connections (only neighbors).
-    let mut connection_pairs_set: HashSet<(usize, usize)> = HashSet::new();
-    for (i, neighbors) in neighbor_sets.iter().enumerate().take(n) {
-        for &neighbor_rank in neighbors {
-            let j = neighbor_rank as usize;
-            if i < j {
-                connection_pairs_set.insert((i, j));
-            } else if j < i {
-                connection_pairs_set.insert((j, i));
-            }
-        }
-    }
-    let pairs: Vec<(usize, usize)> = connection_pairs_set.into_iter().collect();
-
-    let (listeners, listen_addrs, client_configs) = prepare_tls_infra(&workers)?;
-    let (all_peers, all_endpoints) =
-        establish_connections(&workers, &pairs, &listen_addrs, &client_configs, &listeners).await?;
-
-    let mut clients = Vec::new();
-    for (idx, (peers, endpoints)) in all_peers.into_iter().zip(all_endpoints).enumerate() {
-        let rank = workers[idx].rank;
-        let mut client = NexarClient::new_with_config(
-            rank,
-            workers[idx].world_size,
-            peers,
-            Arc::clone(&adapter),
-            crate::transport::buffer_pool::PoolProfile::Training,
-            config.clone(),
-        );
-        client._endpoints = endpoints;
-
-        let rt = Arc::new(build_routing_table(&config.topology, rank, world_size));
-        client.setup_relay(rt).await;
-
-        clients.push(client);
-    }
-
-    clients.sort_by_key(|c| c.rank());
-    establish_tcp_sidecars(&clients).await?;
-    Ok(clients)
+    members.sort_by_key(|(c, _)| c.rank());
+    Ok(LocalCluster {
+        seed,
+        formed,
+        members,
+    })
 }
 
 #[cfg(test)]

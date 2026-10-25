@@ -72,6 +72,7 @@ mod tests {
             capabilities: 0xABCD,
             cluster_token: vec![],
             listen_addr: String::new(),
+            requested_rank: None,
         };
         let buf = encode_message(&msg, Priority::Critical).unwrap();
         let (header, decoded) = decode_message(&buf).unwrap();
@@ -101,6 +102,7 @@ mod tests {
             ca_cert: vec![1, 2, 3],
             node_cert: vec![4, 5, 6],
             node_key: vec![7, 8, 9],
+            observed_addr: "10.0.0.7".into(),
         };
         let buf = encode_message(&msg, Priority::Realtime).unwrap();
         let (_, decoded) = decode_message(&buf).unwrap();

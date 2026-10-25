@@ -7,6 +7,9 @@ use crate::cluster::recovery::RecoveryPolicy;
 use crate::cluster::sparse::TopologyStrategy;
 use std::time::Duration;
 
+/// Default for [`NexarConfig::max_frame_bytes`]: 4 GiB, the largest message the QUIC router accepts.
+pub const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 /// Tuning parameters for collective operations and transport.
 #[derive(Debug, Clone)]
 pub struct NexarConfig {
@@ -54,6 +57,17 @@ pub struct NexarConfig {
     /// Only meaningful when `enable_tcp_bulk_sidecar` is `true`.
     pub encrypt_bulk_transport: bool,
 
+    /// Largest TCP bulk sidecar frame, in bytes, that this rank accepts.
+    ///
+    /// A longer frame closes the sidecar, and receivers on it get
+    /// [`NexarError::FrameTooLarge`](crate::NexarError::FrameTooLarge). The
+    /// receiver reads a frame in steps and grows its buffer as data arrives, so
+    /// a peer that announces a huge length allocates nothing until it sends the
+    /// bytes. The default is 4 GiB, the largest message the QUIC router accepts,
+    /// so every legitimate send fits. Lower it to cap memory per frame. Set the
+    /// same value on every rank: a sender never splits a frame.
+    pub max_frame_bytes: usize,
+
     /// Maximum memory (in bytes) that compressed allreduce may allocate for
     /// buffering compressed chunks from all peers.
     ///
@@ -99,6 +113,7 @@ impl Default for NexarConfig {
             ring_max_world: 8,
             enable_tcp_bulk_sidecar: true,
             encrypt_bulk_transport: true,
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             compressed_allreduce_max_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
             heartbeat_interval: Duration::from_secs(1),
             heartbeat_timeout: Duration::from_secs(5),
@@ -124,6 +139,7 @@ impl NexarConfig {
     /// - `NEXAR_RING_MAX_WORLD`
     /// - `NEXAR_ENABLE_TCP_BULK_SIDECAR` (default: true, set to "0" or "false" to disable)
     /// - `NEXAR_ENCRYPT_BULK_TRANSPORT` (default: true, set to "0" or "false" to disable)
+    /// - `NEXAR_MAX_FRAME_BYTES` (default: 4 GiB)
     /// - `NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES` (default: 4 GiB, set to "0" to disable)
     /// - `NEXAR_HEARTBEAT_INTERVAL_SECS` (default: 1)
     /// - `NEXAR_HEARTBEAT_TIMEOUT_SECS` (default: 5)
@@ -167,6 +183,11 @@ impl NexarConfig {
         }
         if let Ok(v) = std::env::var("NEXAR_ENCRYPT_BULK_TRANSPORT") {
             cfg.encrypt_bulk_transport = v != "0" && v.to_lowercase() != "false";
+        }
+        if let Ok(v) = std::env::var("NEXAR_MAX_FRAME_BYTES")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.max_frame_bytes = n;
         }
         if let Ok(v) = std::env::var("NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES")
             && let Ok(n) = v.parse::<usize>()

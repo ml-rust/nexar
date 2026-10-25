@@ -400,35 +400,6 @@ pub fn make_bulk_tls_client_config(
     Ok(Arc::new(tls_config))
 }
 
-/// Build a `rustls::ServerConfig` that skips client auth for the TCP bulk sidecar.
-///
-/// Used in `bootstrap_local` where all nodes share self-signed certs.
-/// Provides encryption without authentication (same trust boundary as QUIC bootstrap).
-pub(crate) fn make_bulk_tls_server_config_insecure() -> Result<Arc<rustls::ServerConfig>> {
-    let (cert, key) = generate_self_signed_cert()?;
-
-    let mut tls_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert], key)
-        .map_err(|e| NexarError::Tls(format!("bulk TLS insecure server: {e}")))?;
-
-    tls_config.alpn_protocols = vec![b"nexar-bulk/1".to_vec()];
-    Ok(Arc::new(tls_config))
-}
-
-/// Build a `rustls::ClientConfig` that skips server verification for the TCP bulk sidecar.
-///
-/// Used in `bootstrap_local` where all nodes share self-signed certs.
-pub(crate) fn make_bulk_tls_client_config_insecure() -> Result<Arc<rustls::ClientConfig>> {
-    let mut tls_config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-        .with_no_client_auth();
-
-    tls_config.alpn_protocols = vec![b"nexar-bulk/1".to_vec()];
-    Ok(Arc::new(tls_config))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

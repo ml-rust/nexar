@@ -16,16 +16,16 @@ pub mod types;
 
 pub use client::{NexarClient, SyncClient};
 pub use cluster::{
-    ElasticBootstrap, ElasticConfig, ElasticEvent, ElasticManager, FormClusterResult,
-    RecoveryEvent, RecoveryOrchestrator, RecoveryPolicy, RoutingTable, SeedNode, SpanningTree,
-    TopologyStrategy, WorkerNode,
+    ClusterConfig, ElasticBootstrap, ElasticConfig, ElasticEvent, ElasticManager,
+    FormClusterResult, RecoveryEvent, RecoveryOrchestrator, RecoveryPolicy, RoutingTable, SeedNode,
+    SpanningTree, TopologyStrategy, WorkerNode,
 };
 pub use collective::{CollectiveGroup, CollectiveHandle};
 pub use config::NexarConfig;
 pub use device::{CpuAdapter, DeviceAdapter};
 pub use error::{NexarError, Result};
 pub use memory::{BufferPtr, BufferRef, Device, GlobalPtr, Host, MemorySpace};
-pub use protocol::NexarMessage;
+pub use protocol::{AbortReason, NexarMessage};
 pub use transport::buffer_pool::{BufferPool, PoolBuilder, PoolProfile, TierConfig};
 pub use transport::{
     BulkTransport, PeerConnection, TaggedBulkTransport, TcpBulkTransport, TransportListener,

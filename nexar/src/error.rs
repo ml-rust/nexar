@@ -76,8 +76,38 @@ pub enum NexarError {
     #[error("operation cancelled")]
     Cancelled,
 
-    #[error("cluster token mismatch: bootstrap authentication failed")]
+    #[error(
+        "cluster token mismatch: bootstrap authentication failed; set the same token on the seed and every worker"
+    )]
     ClusterTokenMismatch,
+
+    #[error("requested rank {rank} rejected: {detail}")]
+    RankConflict { rank: Rank, detail: String },
+
+    #[error(
+        "join timed out after {timeout_ms}ms waiting for {stage}; check that the seed is reachable and every rank started"
+    )]
+    JoinTimeout {
+        stage: &'static str,
+        timeout_ms: u64,
+    },
+
+    #[error(
+        "shutdown incomplete after {timeout_ms}ms: peers {timed_out:?} did not shut down in time, peers {disconnected:?} disconnected first; data sent to them may be lost, so call shutdown on every rank"
+    )]
+    ShutdownIncomplete {
+        timed_out: Vec<Rank>,
+        disconnected: Vec<Rank>,
+        timeout_ms: u64,
+    },
+
+    #[error("cluster bootstrap aborted: {reason}")]
+    BootstrapAborted { reason: String },
+
+    #[error(
+        "cluster token required for non-loopback address {addr}: set ClusterConfig::cluster_token or NEXAR_CLUSTER_TOKEN to the same secret on every process"
+    )]
+    TokenRequired { addr: std::net::SocketAddr },
 
     #[error(
         "count {count} is not evenly divisible by world size {world_size} (required by {operation})"
@@ -102,6 +132,11 @@ pub enum NexarError {
 
     #[error("elastic scaling error: {0}")]
     Elastic(String),
+
+    #[error(
+        "bulk frame of {len} bytes exceeds the {max}-byte limit; raise NexarConfig::max_frame_bytes (NEXAR_MAX_FRAME_BYTES) on the receiving rank or send smaller messages"
+    )]
+    FrameTooLarge { len: u64, max: usize },
 }
 
 impl NexarError {
@@ -251,6 +286,27 @@ mod tests {
                 timeout_ms: 60000,
             },
             NexarError::Elastic("max world size exceeded".into()),
+            NexarError::ClusterTokenMismatch,
+            NexarError::RankConflict {
+                rank: 1,
+                detail: "taken".into(),
+            },
+            NexarError::JoinTimeout {
+                stage: "Welcome",
+                timeout_ms: 10,
+            },
+            NexarError::BootstrapAborted {
+                reason: "seed gone".into(),
+            },
+            NexarError::ShutdownIncomplete {
+                timed_out: vec![1],
+                disconnected: vec![],
+                timeout_ms: 10,
+            },
+            NexarError::TokenRequired {
+                addr: "10.0.0.1:7000".parse().unwrap(),
+            },
+            NexarError::FrameTooLarge { len: 9, max: 8 },
         ];
         for e in &errors {
             assert!(!e.to_string().is_empty(), "empty display for {e:?}");

@@ -23,6 +23,14 @@ pub trait BulkTransport: Send + Sync + 'static {
             ))
         })
     }
+
+    /// Flush pending sends and close the sending side cleanly.
+    ///
+    /// [`NexarClient::shutdown`](crate::NexarClient::shutdown) calls it once per
+    /// peer. Default: nothing to flush.
+    fn shutdown<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Stream type tag: first byte on every QUIC uni stream.

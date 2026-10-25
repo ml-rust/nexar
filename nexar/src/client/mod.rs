@@ -1,6 +1,9 @@
 mod async_client;
 mod bootstrap;
+mod bootstrap_cluster;
 mod bootstrap_mesh;
+mod bootstrap_peer;
+mod bootstrap_sidecar;
 mod byte_transport;
 mod collectives;
 mod collectives_nb;
@@ -8,6 +11,7 @@ mod elastic;
 mod hash;
 mod messaging;
 mod rebuild;
+mod shutdown;
 mod split;
 mod sync_client;
 mod typed_collectives;

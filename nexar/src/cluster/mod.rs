@@ -1,11 +1,17 @@
+mod cluster_config;
+pub(crate) mod control;
 pub mod elastic;
 mod health;
 pub mod recovery;
 mod seed;
+mod seed_elastic;
+mod seed_join;
+mod seed_stages;
 pub mod sparse;
 mod topology;
-mod worker;
+pub(crate) mod worker;
 
+pub use cluster_config::{CLUSTER_TOKEN_ENV, ClusterConfig, DEFAULT_JOIN_TIMEOUT};
 pub use elastic::{ElasticBootstrap, ElasticConfig, ElasticEvent, ElasticManager};
 pub use health::HealthMonitor;
 pub use recovery::{RecoveryEvent, RecoveryOrchestrator, RecoveryPolicy};

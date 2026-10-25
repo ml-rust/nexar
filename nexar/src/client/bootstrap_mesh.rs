@@ -1,252 +1,240 @@
-//! Mesh establishment helpers for bootstrap: TLS setup, two-phase connection,
-//! and TCP sidecar attachment.
+//! Mesh formation for one rank. In-process and multi-process bootstraps share it.
+//!
+//! 1. Bind this rank's mTLS listener and, if needed, its TCP sidecar listener.
+//! 2. Report the advertised address to the seed and wait for the peer table.
+//! 3. Dial higher-ranked neighbors, accept lower-ranked ones, attach sidecars.
+//! 4. Enter the seed's ready barrier.
 
 use crate::client::NexarClient;
+use crate::client::bootstrap_peer::{MeshPlan, connect_links};
+use crate::client::bootstrap_sidecar::Sidecar;
 use crate::cluster::WorkerNode;
+use crate::cluster::sparse::{TopologyStrategy, build_neighbors, build_routing_table};
+use crate::config::NexarConfig;
+use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
-use crate::transport::PeerConnection;
+use crate::transport::buffer_pool::PoolProfile;
 use crate::transport::tls::make_client_config_mtls;
+use crate::transport::{PeerConnection, TaggedBulkTransport, TransportListener};
 use crate::types::Rank;
-use std::collections::HashMap;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// Prepare TLS infrastructure: listeners, listen addresses, and client configs.
-pub(super) fn prepare_tls_infra(
-    workers: &[WorkerNode],
-) -> Result<(
-    Vec<crate::transport::TransportListener>,
-    Vec<SocketAddr>,
-    Vec<quinn::ClientConfig>,
-)> {
-    let ca_cert_der = rustls::pki_types::CertificateDer::from(workers[0].ca_cert.clone());
-
-    let mut listeners = Vec::new();
-    let mut listen_addrs = Vec::new();
-    for w in workers {
-        let cert = rustls::pki_types::CertificateDer::from(w.node_cert.clone());
-        let key = rustls::pki_types::PrivateKeyDer::try_from(w.node_key.clone())
-            .map_err(|e| NexarError::Tls(format!("parse node key for rank {}: {e}", w.rank)))?;
-        let listener = crate::transport::TransportListener::bind_with_mtls(
-            "127.0.0.1:0".parse().expect("hardcoded socket addr"),
-            cert,
-            key,
-            &ca_cert_der,
-        )?;
-        listen_addrs.push(listener.local_addr());
-        listeners.push(listener);
-    }
-
-    let mut client_configs = Vec::new();
-    for w in workers {
-        let cert = rustls::pki_types::CertificateDer::from(w.node_cert.clone());
-        let key = rustls::pki_types::PrivateKeyDer::try_from(w.node_key.clone())
-            .map_err(|e| NexarError::Tls(format!("parse node key for rank {}: {e}", w.rank)))?;
-        client_configs.push(make_client_config_mtls(cert, key, &ca_cert_der)?);
-    }
-
-    Ok((listeners, listen_addrs, client_configs))
+/// Where this rank listens and what it advertises.
+pub(super) struct MeshAddrs {
+    pub bind: SocketAddr,
+    pub advertise: Option<SocketAddr>,
 }
 
-/// Two-phase connection establishment that avoids the connection swapping bug.
-///
-/// The old approach had each (i,j) pair task call `accept()` on listener j concurrently.
-/// When multiple pairs share the same listener j, their `accept()` calls race and can
-/// receive connections from the wrong peer, causing data to route to wrong PeerRouters.
-///
-/// Fix: Phase 1 spawns all outgoing connects. Phase 2 runs one accept loop per listener
-/// (concurrently across listeners, sequentially within each). Phase 3 matches accepted
-/// connections to connectors by comparing remote_addr == connector local_addr.
-pub(super) async fn establish_connections(
-    workers: &[WorkerNode],
-    pairs: &[(usize, usize)],
-    listen_addrs: &[SocketAddr],
-    client_configs: &[quinn::ClientConfig],
-    listeners: &[crate::transport::TransportListener],
-) -> Result<(
-    Vec<HashMap<Rank, PeerConnection>>,
-    Vec<Vec<quinn::Endpoint>>,
-)> {
-    let n = workers.len();
+/// An error and whether the seed still needs to hear about it.
+struct MeshError {
+    error: NexarError,
+    report: bool,
+}
 
-    // Count expected incoming connections per listener.
-    let mut accept_counts: Vec<usize> = vec![0; n];
-    for &(_i, j) in pairs {
-        accept_counts[j] += 1;
+fn local(error: NexarError) -> MeshError {
+    MeshError {
+        error,
+        report: true,
     }
+}
 
-    // Phase 1: Spawn all outgoing connects concurrently.
-    let mut connect_handles = Vec::new();
-    for &(i, j) in pairs {
-        let addr_j = listen_addrs[j];
-        let config_i = client_configs[i].clone();
-
-        connect_handles.push(tokio::spawn(async move {
-            let mut endpoint =
-                quinn::Endpoint::client("127.0.0.1:0".parse().expect("hardcoded socket addr"))
-                    .map_err(|e| NexarError::transport_with_source("mesh client", e))?;
-            endpoint.set_default_client_config(config_i);
-
-            let local_addr = endpoint
-                .local_addr()
-                .map_err(|e| NexarError::transport_with_source("endpoint local_addr", e))?;
-
-            let connecting = endpoint
-                .connect(addr_j, "localhost")
-                .map_err(|e| NexarError::transport_with_source("mesh connect", e))?;
-
-            let conn = connecting
-                .await
-                .map_err(|e| NexarError::transport_with_source("mesh handshake", e))?;
-
-            Ok::<_, NexarError>((i, j, conn, endpoint, local_addr))
-        }));
+fn from_seed(error: NexarError) -> MeshError {
+    MeshError {
+        error,
+        report: false,
     }
+}
 
-    // Phase 2: Accept all expected connections per listener.
-    let connect_fut = async {
-        let mut results = Vec::new();
-        for h in connect_handles {
-            results
-                .push(h.await.map_err(|e| {
-                    NexarError::transport_with_source("connect task panicked", e)
-                })??);
+/// Build this rank's part of the mesh and return its client.
+///
+/// A local error goes to the seed, which aborts the other ranks.
+pub(super) async fn join_mesh(
+    worker: &mut WorkerNode,
+    addrs: &MeshAddrs,
+    adapter: Arc<dyn DeviceAdapter>,
+    config: NexarConfig,
+) -> Result<NexarClient> {
+    match build_client(worker, addrs, adapter, config).await {
+        Ok(client) => {
+            worker.ready().await?;
+            Ok(client)
         }
-        Ok::<_, NexarError>(results)
-    };
-
-    let accept_fut = async {
-        let mut futs = Vec::new();
-        for j in 0..n {
-            let count = accept_counts[j];
-            if count == 0 {
-                continue;
+        Err(MeshError { error, report }) => {
+            if report {
+                worker.report_failure(&error).await;
             }
-            let listener = &listeners[j];
-            futs.push(async move {
-                let mut accepted = Vec::new();
-                for _ in 0..count {
-                    let conn = listener.accept().await?;
-                    let remote = conn.remote_address();
-                    accepted.push((j, conn, remote));
-                }
-                Ok::<_, NexarError>(accepted)
-            });
+            Err(error)
         }
-        let results = futures::future::try_join_all(futs).await?;
-        Ok::<_, NexarError>(results.into_iter().flatten().collect::<Vec<_>>())
-    };
-
-    // Run connects and accepts concurrently.
-    let (connect_results, accepted_conns) = tokio::try_join!(connect_fut, accept_fut)?;
-
-    // Phase 3: Match accepted connections to connectors by address.
-    let mut accept_map: HashMap<(usize, SocketAddr), quinn::Connection> = HashMap::new();
-    for (j, conn, remote) in accepted_conns {
-        accept_map.insert((j, remote), conn);
     }
-
-    let mut all_peers: Vec<HashMap<Rank, PeerConnection>> =
-        (0..n).map(|_| HashMap::new()).collect();
-    let mut all_endpoints: Vec<Vec<quinn::Endpoint>> = (0..n).map(|_| Vec::new()).collect();
-
-    for (i, j, connected, endpoint, local_addr) in connect_results {
-        let rank_i = workers[i].rank;
-        let rank_j = workers[j].rank;
-
-        let accepted = accept_map.remove(&(j, local_addr)).ok_or_else(|| {
-            NexarError::transport(format!(
-                "no accepted connection on listener {j} from {local_addr} \
-                     (pair ({i},{j}), ranks ({rank_i},{rank_j}))"
-            ))
-        })?;
-
-        let conn_ij = PeerConnection::new(rank_j, connected);
-        let conn_ji = PeerConnection::new(rank_i, accepted);
-
-        tokio::join!(conn_ij.warm_stream_pool(), conn_ji.warm_stream_pool());
-
-        all_peers[i].insert(rank_j, conn_ij);
-        all_peers[j].insert(rank_i, conn_ji);
-        all_endpoints[i].push(endpoint);
-    }
-
-    Ok((all_peers, all_endpoints))
 }
 
-/// Establish TCP bulk sidecar connections between all peer pairs.
-///
-/// For each (i, j) pair with i < j: rank i listens, rank j connects.
-/// Respects `NexarConfig::enable_tcp_bulk_sidecar` — skips entirely if disabled.
-pub(super) async fn establish_tcp_sidecars(clients: &[NexarClient]) -> Result<()> {
-    use crate::transport::TaggedBulkTransport;
-    use crate::transport::tcp_bulk::{
-        tcp_bulk_accept, tcp_bulk_accept_tls, tcp_bulk_connect, tcp_bulk_connect_tls,
-        tcp_bulk_listen,
-    };
-    use crate::transport::tls::{
-        make_bulk_tls_client_config_insecure, make_bulk_tls_server_config_insecure,
-    };
+async fn build_client(
+    worker: &mut WorkerNode,
+    addrs: &MeshAddrs,
+    adapter: Arc<dyn DeviceAdapter>,
+    config: NexarConfig,
+) -> std::result::Result<NexarClient, MeshError> {
+    let (rank, world) = (worker.rank, worker.world_size);
+    let ca = CertificateDer::from(worker.ca_cert.clone());
+    let cert = CertificateDer::from(worker.node_cert.clone());
+    let key = PrivateKeyDer::try_from(worker.node_key.clone()).map_err(|e| {
+        local(NexarError::Tls(format!(
+            "parse node key for rank {rank}: {e}"
+        )))
+    })?;
 
-    let n = clients.len();
-    if n <= 1 {
-        return Ok(());
+    let listener =
+        TransportListener::bind_with_mtls(addrs.bind, cert.clone(), key.clone_key(), &ca)
+            .map_err(local)?;
+    let advertised = advertised_addr(addrs, listener.local_addr(), worker).map_err(local)?;
+
+    let neighbors = mesh_neighbors(&config.topology, rank, world);
+    let lower: Vec<Rank> = neighbors.iter().copied().filter(|&r| r < rank).collect();
+    let higher: Vec<Rank> = neighbors.iter().copied().filter(|&r| r > rank).collect();
+    let sidecar = Sidecar::prepare(
+        &config,
+        addrs.bind,
+        advertised,
+        !higher.is_empty(),
+        (&cert, &key, &ca),
+    )
+    .await
+    .map_err(local)?;
+
+    let peers = worker
+        .announce_mesh(advertised.to_string())
+        .await
+        .map_err(from_seed)?;
+    let mut table = HashMap::new();
+    for (r, addr) in peers {
+        let parsed: SocketAddr = addr.parse().map_err(|e| {
+            from_seed(NexarError::DecodeFailed(format!(
+                "seed sent invalid address '{addr}' for rank {r}: {e}"
+            )))
+        })?;
+        table.insert(r, parsed);
     }
 
-    let config = clients[0].config();
-    if !config.enable_tcp_bulk_sidecar {
-        tracing::info!("TCP bulk sidecar disabled by config");
-        return Ok(());
-    }
-
-    let encrypt = config.encrypt_bulk_transport;
-    if !encrypt {
-        tracing::warn!(
-            "TCP bulk sidecar is UNENCRYPTED. Tensor data will be sent in plaintext. \
-             Set NEXAR_ENCRYPT_BULK_TRANSPORT=true or config.encrypt_bulk_transport=true \
-             to enable TLS on the bulk transport."
-        );
-    }
-
-    let tls_server = if encrypt {
-        Some(make_bulk_tls_server_config_insecure()?)
-    } else {
-        None
+    let plan = MeshPlan {
+        rank,
+        table: &table,
+        lower: &lower,
+        higher: &higher,
+        quic_client: make_client_config_mtls(cert, key, &ca).map_err(local)?,
+        sidecar: &sidecar,
     };
-    let tls_client = if encrypt {
-        Some(make_bulk_tls_client_config_insecure()?)
-    } else {
-        None
+    let deadline = worker.deadline();
+    let timeout_ms = worker.join_timeout().as_millis() as u64;
+    let links = tokio::select! {
+        links = tokio::time::timeout_at(deadline, connect_links(&plan, &listener)) => match links {
+            Ok(Ok(links)) => links,
+            Ok(Err(e)) => return Err(local(e)),
+            Err(_) => return Err(local(NexarError::JoinTimeout { stage: "peer connections", timeout_ms })),
+        },
+        e = worker.next_abort() => return Err(from_seed(e)),
     };
 
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let rank_j = clients[j].rank();
-            let rank_i = clients[i].rank();
+    let mut peer_conns = HashMap::new();
+    for (r, conn) in links.conns {
+        peer_conns.insert(r, PeerConnection::new(r, conn));
+    }
+    futures::future::join_all(peer_conns.values().map(|p| p.warm_stream_pool())).await;
 
-            let bind_addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
-                std::net::Ipv4Addr::LOCALHOST,
-                0,
-            ));
-            let (listener, addr) = tcp_bulk_listen(bind_addr).await?;
+    let sparse = !matches!(config.topology, TopologyStrategy::FullMesh);
+    let topology = config.topology.clone();
+    let mut client = NexarClient::new_with_config(
+        rank,
+        world,
+        peer_conns,
+        adapter,
+        PoolProfile::Training,
+        config,
+    );
+    // The mesh is complete: refuse further inbound connections on this endpoint.
+    let endpoint = listener.endpoint().clone();
+    endpoint.set_server_config(None);
+    client.mesh.add_endpoint(endpoint);
+    if sparse {
+        let table = Arc::new(build_routing_table(&topology, rank, world));
+        client.setup_relay(table).await;
+    }
+    for (r, transport) in links.sidecars {
+        client
+            .peer(r)
+            .and_then(|p| p.add_extension(Arc::new(transport) as Arc<dyn TaggedBulkTransport>))
+            .map_err(local)?;
+    }
+    Ok(client)
+}
 
-            let (transport_i, transport_j) =
-                if let (Some(sc), Some(cc)) = (&tls_server, &tls_client) {
-                    tokio::try_join!(
-                        tcp_bulk_accept_tls(&listener, Arc::clone(sc)),
-                        tcp_bulk_connect_tls(addr, Arc::clone(cc)),
-                    )?
-                } else {
-                    tokio::try_join!(tcp_bulk_accept(&listener), tcp_bulk_connect(addr),)?
-                };
+/// The address peers dial: the advertise IP, else the bind IP, else the IP the
+/// seed observes. The port is the advertise port, else the bound port.
+fn advertised_addr(
+    addrs: &MeshAddrs,
+    bound: SocketAddr,
+    worker: &WorkerNode,
+) -> Result<SocketAddr> {
+    let host = addrs
+        .advertise
+        .map(|a| a.ip())
+        .filter(|ip| !ip.is_unspecified())
+        .or(Some(addrs.bind.ip()).filter(|ip| !ip.is_unspecified()))
+        .or(worker.observed_ip)
+        .ok_or_else(|| NexarError::BootstrapAborted {
+            reason: format!(
+                "rank {} has no address to advertise: set ClusterConfig::advertise_addr",
+                worker.rank
+            ),
+        })?;
+    let port = addrs
+        .advertise
+        .map(|a| a.port())
+        .filter(|&p| p != 0)
+        .unwrap_or(bound.port());
+    Ok(SocketAddr::new(host, port))
+}
 
-            let peer_ij = clients[i].peer(rank_j)?;
-            peer_ij.add_extension(Arc::new(transport_i) as Arc<dyn TaggedBulkTransport>)?;
-
-            let peer_ji = clients[j].peer(rank_i)?;
-            peer_ji.add_extension(Arc::new(transport_j) as Arc<dyn TaggedBulkTransport>)?;
+/// Ranks this rank links to directly. Symmetric: `j` is a neighbor of `i`
+/// when either rank's topology lists the other.
+pub(super) fn mesh_neighbors(
+    topology: &TopologyStrategy,
+    rank: Rank,
+    world: u32,
+) -> BTreeSet<Rank> {
+    let mut set: BTreeSet<Rank> = build_neighbors(topology, rank, world)
+        .into_iter()
+        .filter(|&r| r != rank && r < world)
+        .collect();
+    if !matches!(topology, TopologyStrategy::FullMesh) {
+        for other in (0..world).filter(|&r| r != rank) {
+            if build_neighbors(topology, other, world).contains(&rank) {
+                set.insert(other);
+            }
         }
     }
+    set
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mesh_neighbors_full_mesh() {
+        let n = mesh_neighbors(&TopologyStrategy::FullMesh, 1, 4);
+        assert_eq!(n.into_iter().collect::<Vec<_>>(), vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn test_mesh_neighbors_symmetric() {
+        let topo = TopologyStrategy::KRegular { degree: 2 };
+        for i in 0..6 {
+            for j in mesh_neighbors(&topo, i, 6) {
+                assert!(mesh_neighbors(&topo, j, 6).contains(&i), "{i} -> {j}");
+            }
+        }
+    }
 }

@@ -92,6 +92,66 @@ async fn main() -> nexar::Result<()> {
 
 The raw-pointer collective methods are `unsafe`. The caller must keep the buffer valid and sized for `count` elements of `dtype` until the call returns.
 
+## Multi-host deployment
+
+`bootstrap_local` runs every rank in one process. For one process per rank, start rank 0 with `bootstrap_seed` and every other rank with `bootstrap_join`. Each host sets `advertise_addr` to its own reachable IP:
+
+```rust
+use nexar::{ClusterConfig, CpuAdapter, NexarClient};
+use std::sync::Arc;
+
+async fn join(is_seed: bool) -> nexar::Result<NexarClient> {
+    let seed_addr = "10.0.0.1:7000".parse().unwrap();
+    let cfg = ClusterConfig::new(4)
+        .with_bind_addr("0.0.0.0:7001".parse().unwrap())
+        .with_advertise_addr("10.0.0.2:7001".parse().unwrap())
+        .with_cluster_token(std::env::var("NEXAR_CLUSTER_TOKEN").unwrap());
+    let adapter = Arc::new(CpuAdapter::new());
+    if is_seed {
+        NexarClient::bootstrap_seed(seed_addr, &cfg, adapter).await
+    } else {
+        NexarClient::bootstrap_join(seed_addr, &cfg, adapter).await
+    }
+}
+```
+
+Formation runs in four steps:
+
+1. Each worker sends `Hello` to the seed. The seed assigns ranks and answers with `Welcome`: the rank and an mTLS certificate from an ephemeral cluster CA.
+2. Each rank binds its mesh listener and reports the address with `MeshListen`.
+3. The seed broadcasts the `PeerTable` once every rank reports. Each rank dials higher ranks and accepts lower ranks.
+4. Each rank enters the seed's ready barrier. The bootstrap returns once every rank is ready.
+
+`ClusterConfig` fields:
+
+| Field            | Meaning                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------- |
+| `world_size`     | Number of ranks. Every process uses the same value.                                               |
+| `bind_addr`      | Local mesh listener. The port carries QUIC (UDP) and the TCP bulk sidecar.                        |
+| `advertise_addr` | Address peers dial. Default: `bind_addr`. An unspecified IP becomes the IP the seed observes.     |
+| `requested_rank` | Rank this process asks for. Default: the seed assigns ranks in arrival order.                     |
+| `cluster_token`  | Shared secret. Default: `NEXAR_CLUSTER_TOKEN`.                                                    |
+| `join_timeout`   | Limit for the whole formation. Default: 60 s.                                                     |
+| `nexar`          | `NexarConfig` of the returned client.                                                             |
+
+Set these on every host:
+
+- **Seed address:** every process uses the address the seed binds. Rank 0 binds it.
+- **Token:** the bootstrap connection does not verify the seed's certificate. The token is the only defense against a stranger who joins or poses as the seed. A bind, seed, or advertise address that is not loopback requires a token. Use the same secret on every process.
+- **Firewall:** open the seed port for UDP. Open each rank's mesh port for UDP (QUIC) and TCP (bulk sidecar). With `bind_addr` port 0, the ports are ephemeral. Fix the port to write a firewall rule.
+- **NAT and containers:** set `advertise_addr` to the address peers can reach. With a published container port, map the same port for UDP and TCP.
+- **Sidecar:** set the same `enable_tcp_bulk_sidecar` and `encrypt_bulk_transport` on every rank. A mismatch fails formation. Set `max_frame_bytes` (default 4 GiB) to the largest message you send; a longer frame closes the sidecar with `FrameTooLarge`.
+
+### Shutdown
+
+Call `client.shutdown().await` on every rank after its last send and recv, before the process exits. Closing a QUIC connection discards data the peer has not acknowledged, so a rank that exits right after its last collective can lose that collective's final message.
+
+`shutdown` flushes and closes the TCP sidecars, exchanges a done signal with every direct peer, and closes each connection once the peer is done too. A peer that dropped its client counts as done. After the barrier timeout, or the limit passed to `shutdown_with_timeout`, every connection closes anyway and the call returns `ShutdownIncomplete` with the peers that did not finish.
+
+Dropping the last client that shares a mesh closes its connections at once. Unlike `shutdown`, a drop can lose unacknowledged data.
+
+A failure on one rank aborts formation on every rank with a typed error: `RankConflict`, `ClusterTokenMismatch`, `ProtocolMismatch`, `ClusterFormationTimeout`, `JoinTimeout`, or `ConnectionFailed { rank }`.
+
 ## Collectives
 
 `NexarClient` exposes 11 collectives. Each one has an `_nb` variant that returns a `CollectiveHandle`. Call `wait` on the handle to finish the operation.
@@ -133,7 +193,7 @@ Runnable examples live in [`nexar/examples/`](nexar/examples/):
 | [`broadcast`](nexar/examples/broadcast.rs)     | Tree broadcast from root to all ranks                 |
 | [`barrier`](nexar/examples/barrier.rs)         | Barrier synchronization with staggered arrivals       |
 | [`rpc`](nexar/examples/rpc.rs)                 | Register a remote function and call it across ranks   |
-| [`seed_worker`](nexar/examples/seed_worker.rs) | Manual cluster setup with seed and worker nodes       |
+| [`seed_worker`](nexar/examples/seed_worker.rs) | One process per rank: `seed` and `join` modes         |
 
 Run an example from the repository root:
 
@@ -155,7 +215,7 @@ seed node (discovery only, no data routing)
     └── direct peer-to-peer mesh
 ```
 
-Workers connect to the seed to get a rank and a peer list. They then open direct QUIC connections to their peers. The seed is not on the data path.
+Workers connect to the seed to get a rank, a certificate, and the peer table. They then open direct mTLS QUIC connections to their peers. The seed is not on the data path.
 
 Each peer connection runs a router. The router accepts incoming QUIC streams and sends each one to a typed lane:
 

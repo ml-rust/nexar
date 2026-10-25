@@ -100,8 +100,9 @@ pub struct NexarClient {
     pub(crate) relay_deliveries: Option<Arc<RelayDeliveries>>,
     /// Background relay listener task handles.
     pub(super) _relay_handles: Vec<tokio::task::JoinHandle<()>>,
-    /// QUIC client endpoints kept alive so their UDP sockets remain open.
-    pub(crate) _endpoints: Vec<quinn::Endpoint>,
+    /// Connections and endpoints shared with every client derived from this
+    /// one. The last owner to drop closes them.
+    pub(crate) mesh: Arc<super::shutdown::MeshOwner>,
 }
 
 impl NexarClient {
@@ -199,8 +200,10 @@ impl NexarClient {
         let mut routers: HashMap<Rank, PeerRouter> = HashMap::new();
         let mut handles = Vec::new();
 
+        let mesh = Arc::new(super::shutdown::MeshOwner::default());
         for (peer_rank, peer_conn) in peers {
             let conn_clone = peer_conn.conn.clone();
+            mesh.add_conn(peer_conn.conn.clone());
             let (router, handle) = PeerRouter::spawn(peer_rank, conn_clone, Arc::clone(&pool));
             peer_arcs.insert(peer_rank, Arc::new(peer_conn));
             routers.insert(peer_rank, router);
@@ -233,7 +236,7 @@ impl NexarClient {
             routing_table: None,
             relay_deliveries: None,
             _relay_handles: Vec::new(),
-            _endpoints: Vec::new(),
+            mesh,
         }
     }
 

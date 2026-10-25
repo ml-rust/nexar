@@ -1,39 +1,22 @@
+use crate::cluster::ClusterConfig;
+use crate::cluster::seed_join::{HELLO_TIMEOUT, Joiner, MAX_HANDSHAKES};
 use crate::cluster::topology::ClusterMap;
 use crate::error::{NexarError, Result};
-use crate::protocol::NexarMessage;
-use crate::protocol::codec::{decode_message, encode_message};
-use crate::protocol::header::HEADER_SIZE;
+use crate::protocol::{AbortReason, NexarMessage};
 use crate::transport::TransportListener;
 use crate::transport::tls::ClusterCa;
-use crate::types::{PROTOCOL_VERSION, Priority, Rank};
-use quinn::RecvStream;
+use crate::types::Rank;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Read and decode a single framed message from a QUIC recv stream.
-async fn read_framed_message(recv: &mut RecvStream) -> Result<NexarMessage> {
-    let mut header_buf = [0u8; HEADER_SIZE];
-    recv.read_exact(&mut header_buf)
-        .await
-        .map_err(|e| NexarError::transport_with_source("read message header", e))?;
-    let payload_len =
-        u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]]) as usize;
-    let mut payload = vec![0u8; payload_len];
-    recv.read_exact(&mut payload)
-        .await
-        .map_err(|e| NexarError::transport_with_source("read message payload", e))?;
-
-    let mut full_buf = Vec::with_capacity(HEADER_SIZE + payload_len);
-    full_buf.extend_from_slice(&header_buf);
-    full_buf.extend_from_slice(&payload);
-    let (_, msg) = decode_message(&full_buf)?;
-    Ok(msg)
-}
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
 
 /// Result of cluster formation, including the CA for elastic scaling.
 pub struct FormClusterResult {
+    /// Mesh address of every rank.
     pub map: ClusterMap,
+    /// Bootstrap connection to every rank, in rank order.
     pub connections: Vec<quinn::Connection>,
     pub ca: ClusterCa,
     pub next_rank: Rank,
@@ -41,70 +24,83 @@ pub struct FormClusterResult {
 
 /// The seed node orchestrates cluster formation.
 ///
-/// It listens for incoming workers, assigns ranks, and distributes the
-/// peer table once enough workers have joined. During formation, it
-/// generates an ephemeral CA and issues per-node certificates for
-/// mutual TLS on the P2P mesh.
+/// It accepts workers, assigns ranks, issues per-node mTLS certificates from an
+/// ephemeral CA, collects every rank's mesh address, and broadcasts the peer
+/// table. It does not route data.
+///
+/// # Security
+///
+/// Workers do not verify the seed's bootstrap certificate. The cluster token
+/// is the only defense against a stranger who joins or poses as the seed.
 pub struct SeedNode {
-    listener: TransportListener,
-    expected_world_size: u32,
-    formation_timeout: Duration,
-    /// Cluster token for authenticating workers during bootstrap.
-    /// Always `Some` in production (auto-generated if env var is unset).
-    /// `None` only for loopback testing via `bind_local`.
-    cluster_token: Option<Vec<u8>>,
+    pub(super) listener: TransportListener,
+    pub(super) expected_world_size: u32,
+    pub(super) formation_timeout: Duration,
+    /// Token every Hello must carry. `None`: no check (loopback only).
+    pub(super) cluster_token: Option<Vec<u8>>,
+    /// Permits for handshakes in flight. Caps the tasks a connection flood can start.
+    pub(super) handshakes: Arc<Semaphore>,
+    /// Time a connection has to send its Hello.
+    pub(super) hello_timeout: Duration,
 }
 
 impl SeedNode {
     /// Create a seed node bound to the given address.
     ///
-    /// If the `NEXAR_CLUSTER_TOKEN` environment variable is set, workers must
-    /// present the same token in their Hello message to be accepted. If the
-    /// variable is not set, a random token is auto-generated and logged so
-    /// that workers can be configured with it.
+    /// If `NEXAR_CLUSTER_TOKEN` is set, workers must present the same token in
+    /// their Hello. If it is not set, the seed generates a random token and
+    /// logs it, so that workers can be configured with it.
     pub fn bind(addr: SocketAddr, expected_world_size: u32) -> Result<Self> {
-        let listener = TransportListener::bind(addr)?;
-        let cluster_token = match std::env::var("NEXAR_CLUSTER_TOKEN") {
+        let cluster_token = match std::env::var(crate::cluster::CLUSTER_TOKEN_ENV) {
             Ok(t) if !t.is_empty() => {
                 tracing::info!("using cluster token from NEXAR_CLUSTER_TOKEN env var");
                 t.into_bytes()
             }
             _ => {
-                // Generate a random 32-byte token using rcgen's CSPRNG-backed
-                // key generation. We take the first 32 bytes of the serialized
-                // ephemeral key as a cryptographically random token.
+                // The first 32 bytes of a fresh CSPRNG-backed key serve as the token.
                 let ephemeral_key = rcgen::KeyPair::generate()
                     .map_err(|e| NexarError::Tls(format!("generate cluster token: {e}")))?;
-                let der = ephemeral_key.serialize_der();
-                let token: Vec<u8> = der.into_iter().take(32).collect();
+                let token: Vec<u8> = ephemeral_key.serialize_der().into_iter().take(32).collect();
                 let hex_token: String = token.iter().map(|b| format!("{b:02x}")).collect();
                 tracing::warn!(
                     "NEXAR_CLUSTER_TOKEN not set — auto-generated token: {hex_token}. \
                      Set NEXAR_CLUSTER_TOKEN={hex_token} on workers to authenticate."
                 );
-                token
+                hex_token.into_bytes()
             }
         };
-        Ok(Self {
-            listener,
-            expected_world_size,
-            formation_timeout: Duration::from_secs(60),
-            cluster_token: Some(cluster_token),
-        })
+        Self::bind_with_token(addr, expected_world_size, Some(cluster_token))
     }
 
     /// Create a seed node for loopback testing (no token enforcement).
-    ///
-    /// Skips cluster token generation/validation since all connections
-    /// are on localhost within the same process.
     pub fn bind_local(addr: SocketAddr, expected_world_size: u32) -> Result<Self> {
-        let listener = TransportListener::bind(addr)?;
+        Self::bind_with_token(addr, expected_world_size, None)
+    }
+
+    /// Create a seed node that checks `token`. `None` disables the check.
+    pub fn bind_with_token(
+        addr: SocketAddr,
+        expected_world_size: u32,
+        token: Option<Vec<u8>>,
+    ) -> Result<Self> {
         Ok(Self {
-            listener,
+            listener: TransportListener::bind(addr)?,
             expected_world_size,
-            formation_timeout: Duration::from_secs(60),
-            cluster_token: None,
+            formation_timeout: crate::cluster::DEFAULT_JOIN_TIMEOUT,
+            cluster_token: token,
+            handshakes: Arc::new(Semaphore::new(MAX_HANDSHAKES)),
+            hello_timeout: HELLO_TIMEOUT,
         })
+    }
+
+    /// Create the seed of a multi-process cluster.
+    ///
+    /// Takes the world size, token, and join timeout from `cfg`. A
+    /// non-loopback `addr` without a token is an error.
+    pub fn from_config(addr: SocketAddr, cfg: &ClusterConfig) -> Result<Self> {
+        let token = cfg.checked_token(addr)?;
+        Ok(Self::bind_with_token(addr, cfg.world_size, token)?
+            .with_formation_timeout(cfg.join_timeout))
     }
 
     /// Set the cluster formation timeout.
@@ -118,258 +114,96 @@ impl SeedNode {
         self.listener.local_addr()
     }
 
-    /// Wait for all expected workers to join and distribute the peer table.
+    /// The number of ranks this seed waits for.
+    pub fn world_size(&self) -> u32 {
+        self.expected_world_size
+    }
+
+    /// The token this seed checks, for the seed process's own join.
+    pub(crate) fn token(&self) -> Option<Vec<u8>> {
+        self.cluster_token.clone()
+    }
+
+    /// Form the cluster: join, mesh address exchange, and ready barrier.
     ///
-    /// Generates an ephemeral cluster CA and issues a CA-signed leaf
-    /// certificate to each worker via the Welcome message. Workers use
-    /// these credentials for mutual TLS on the P2P mesh.
+    /// 1. Accepts workers until `world_size` valid Hellos arrive. A bad Hello
+    ///    gets an `Abort` reply, and the seed keeps accepting.
+    /// 2. Honors requested ranks and assigns the rest in arrival order.
+    /// 3. Sends each worker a Welcome with its rank and a CA-signed leaf certificate.
+    /// 4. Collects every rank's `MeshListen` and broadcasts the `PeerTable`.
+    /// 5. Waits until every rank enters the ready barrier, then releases them.
     ///
-    /// Returns the cluster map and the list of QUIC connections (one per worker),
-    /// in rank order (rank 0 = seed itself conceptually, ranks 1..N = workers).
-    ///
-    /// The seed does NOT assign itself a rank in the communicator — it is purely
-    /// a coordination node. Workers get ranks 0..world_size-1.
+    /// On timeout every worker gets an `Abort`, and the seed returns
+    /// [`NexarError::ClusterFormationTimeout`]. When a rank reports a failure,
+    /// the seed aborts the others and returns that rank's error.
     pub async fn form_cluster(&self) -> Result<FormClusterResult> {
-        // Generate ephemeral CA for this cluster's lifetime.
+        let deadline = Instant::now() + self.formation_timeout;
         let ca = ClusterCa::generate()?;
-        let ca_cert_der = ca.cert_der();
+        let (mut joiners, mut events) = self.collect_joins(deadline).await?;
+        let _late = self.reject_late_joins();
+
+        if let Err(e) = self.send_welcomes(&ca, &mut joiners).await {
+            let reason = AbortReason::Malformed {
+                detail: format!("seed failed to send Welcome: {e}"),
+            };
+            abort_all(&mut joiners, reason).await;
+            return Err(e);
+        }
+
+        let addrs = self
+            .collect_stage(&mut joiners, &mut events, deadline, Stage::MeshListen)
+            .await?;
+        let mut peers: Vec<(Rank, String)> = addrs.into_iter().collect();
+        peers.sort_by_key(|(r, _)| *r);
+        let table = NexarMessage::PeerTable {
+            peers: peers.clone(),
+        };
+        self.broadcast(&mut joiners, &table, false).await?;
+
+        self.collect_stage(&mut joiners, &mut events, deadline, Stage::Ready)
+            .await?;
+        let release = NexarMessage::BarrierAck {
+            epoch: 0,
+            comm_id: crate::cluster::worker::BOOTSTRAP_COMM_ID,
+        };
+        self.broadcast(&mut joiners, &release, true).await?;
 
         let mut map = ClusterMap::new();
-        let mut connections: Vec<(
-            Rank,
-            quinn::Connection,
-            quinn::SendStream,
-            quinn::RecvStream,
-        )> = Vec::new();
-        let mut next_rank: Rank = 0;
-
-        let deadline = tokio::time::Instant::now() + self.formation_timeout;
-
-        while next_rank < self.expected_world_size {
-            let conn = tokio::select! {
-                result = self.listener.accept() => result?,
-                _ = tokio::time::sleep_until(deadline) => {
-                    return Err(NexarError::ClusterFormationTimeout {
-                        joined: next_rank,
-                        expected: self.expected_world_size,
-                    });
-                }
-            };
-
-            // Accept the first bidirectional stream (control channel).
-            let (send, mut recv) = conn
-                .accept_bi()
-                .await
-                .map_err(|e| NexarError::transport_with_source("accept bi from new worker", e))?;
-
-            // Read Hello message.
-            let msg = read_framed_message(&mut recv).await?;
-
-            let worker_listen_addr = match msg {
-                NexarMessage::Hello {
-                    protocol_version,
-                    cluster_token: token,
-                    listen_addr,
-                    ..
-                } => {
-                    if protocol_version != PROTOCOL_VERSION {
-                        return Err(NexarError::ProtocolMismatch {
-                            local: PROTOCOL_VERSION,
-                            remote: protocol_version,
-                        });
-                    }
-                    if let Some(expected) = &self.cluster_token
-                        && token.as_slice() != expected.as_slice()
-                    {
-                        return Err(NexarError::ClusterTokenMismatch);
-                    }
-                    listen_addr
-                }
-                other => {
-                    return Err(NexarError::DecodeFailed(format!(
-                        "expected Hello, got {other:?}"
-                    )));
-                }
-            };
-
-            let rank = next_rank;
-            let addr = if worker_listen_addr.is_empty() {
-                conn.remote_address().to_string()
-            } else {
-                worker_listen_addr
-            };
+        for (rank, addr) in peers {
             map.add_peer(rank, addr);
-            connections.push((rank, conn, send, recv));
-            next_rank += 1;
-
-            tracing::info!(
-                "worker joined: rank={rank}, total={next_rank}/{}",
-                self.expected_world_size
-            );
         }
-
-        // Build peer table.
-        let peers = map.alive_peers();
-
-        // Send Welcome to each worker with their assigned rank and mTLS credentials.
-        let mut conns = Vec::with_capacity(connections.len());
-        for (rank, conn, mut send, _recv) in connections {
-            // Issue a unique leaf certificate for this worker.
-            let (node_cert, node_key) = ca.issue_cert("localhost")?;
-
-            let welcome = NexarMessage::Welcome {
-                rank,
-                world_size: self.expected_world_size,
-                peers: peers.clone(),
-                ca_cert: ca_cert_der.to_vec(),
-                node_cert: node_cert.to_vec(),
-                node_key: node_key.secret_der().to_vec(),
-            };
-            let buf = encode_message(&welcome, Priority::Critical)?;
-            send.write_all(&buf).await.map_err(|e| {
-                NexarError::transport_with_source(format!("send welcome to rank {rank}"), e)
-            })?;
-            conns.push(conn);
-        }
-
+        tracing::info!(world_size = self.expected_world_size, "cluster formed");
         Ok(FormClusterResult {
             map,
-            connections: conns,
+            connections: joiners.into_iter().map(|j| j.conn).collect(),
             ca,
-            next_rank,
+            next_rank: self.expected_world_size,
         })
     }
+}
 
-    /// Background loop accepting new Hello messages from joining nodes after formation.
-    ///
-    /// Assigns new ranks, issues certs, sends Welcome, and pushes `PendingJoin`
-    /// entries for the `ElasticManager` to process at the next checkpoint.
-    pub async fn accept_elastic(
-        &self,
-        ca: Arc<ClusterCa>,
-        next_rank: Arc<std::sync::atomic::AtomicU32>,
-        max_world_size: u32,
-        pending_joins: Arc<std::sync::Mutex<Vec<PendingJoin>>>,
-        cluster_map: Arc<std::sync::Mutex<ClusterMap>>,
-    ) -> Result<()> {
-        let ca_cert_der = ca.cert_der();
+/// A formation step that needs one message from every rank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stage {
+    MeshListen,
+    Ready,
+}
 
-        loop {
-            let conn = match self.listener.accept().await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("elastic accept error: {e}");
-                    continue;
-                }
-            };
-
-            let (mut send, mut recv) = match conn.accept_bi().await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    tracing::warn!("elastic accept_bi error: {e}");
-                    continue;
-                }
-            };
-
-            // Read Hello.
-            let msg = match read_framed_message(&mut recv).await {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!("elastic join: failed to read hello: {e}");
-                    continue;
-                }
-            };
-
-            let listen_addr = match msg {
-                NexarMessage::Hello {
-                    protocol_version,
-                    cluster_token: token,
-                    listen_addr,
-                    ..
-                } => {
-                    if protocol_version != PROTOCOL_VERSION {
-                        tracing::warn!("elastic join: protocol mismatch");
-                        continue;
-                    }
-                    if let Some(expected) = &self.cluster_token
-                        && token.as_slice() != expected.as_slice()
-                    {
-                        tracing::warn!("elastic join: token mismatch");
-                        continue;
-                    }
-                    listen_addr
-                }
-                _ => continue,
-            };
-
-            let rank = next_rank.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            if max_world_size > 0 && rank >= max_world_size {
-                next_rank.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!("elastic join rejected: max world size {max_world_size} reached");
-                continue;
-            }
-
-            // Resolve the address: use listen_addr if provided, else fall back to
-            // the QUIC connection's remote address.
-            let resolved_addr = if listen_addr.is_empty() {
-                conn.remote_address().to_string()
-            } else {
-                listen_addr
-            };
-
-            // Issue cert for new node.
-            let (node_cert, node_key) = match ca.issue_cert("localhost") {
-                Ok(pair) => pair,
-                Err(e) => {
-                    tracing::warn!("elastic join: cert issue failed: {e}");
-                    continue;
-                }
-            };
-
-            // Get current peers from cluster map.
-            let peers = {
-                let map = cluster_map.lock().unwrap_or_else(|p| p.into_inner());
-                map.alive_peers()
-            };
-
-            // Add to cluster map.
-            {
-                let mut map = cluster_map.lock().unwrap_or_else(|p| p.into_inner());
-                map.add_peer(rank, resolved_addr.clone());
-            }
-
-            let welcome = NexarMessage::Welcome {
-                rank,
-                world_size: rank + 1, // Temporary; real world size set at checkpoint
-                peers,
-                ca_cert: ca_cert_der.as_ref().to_vec(),
-                node_cert: node_cert.as_ref().to_vec(),
-                node_key: node_key.secret_der().to_vec(),
-            };
-
-            let buf = match encode_message(&welcome, Priority::Critical) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!("elastic join: encode welcome failed: {e}");
-                    continue;
-                }
-            };
-            if send.write_all(&buf).await.is_err() {
-                continue;
-            }
-
-            pending_joins
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(PendingJoin {
-                    rank,
-                    listen_addr: resolved_addr,
-                });
-
-            tracing::info!("elastic join: rank {rank} queued for next checkpoint");
+impl Stage {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Stage::MeshListen => "MeshListen",
+            Stage::Ready => "ready barrier",
         }
     }
+}
+
+/// Send `Abort` to every joiner concurrently and wait until each acknowledges it.
+pub(super) async fn abort_all(joiners: &mut [Joiner], reason: AbortReason) {
+    let futs = joiners
+        .iter_mut()
+        .map(|j| crate::cluster::control::send_abort(&mut j.send, reason.clone()));
+    futures::future::join_all(futs).await;
 }
 
 /// A node waiting to join the cluster at the next elastic checkpoint.
@@ -388,5 +222,17 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let seed = SeedNode::bind(addr, 2).unwrap();
         assert_ne!(seed.local_addr().port(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_from_config_requires_token_off_loopback() {
+        let cfg = ClusterConfig::new(2).with_cluster_token("");
+        let addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        assert!(matches!(
+            SeedNode::from_config(addr, &cfg),
+            Err(NexarError::TokenRequired { .. })
+        ));
+        let seed = SeedNode::from_config(addr, &cfg.with_cluster_token("t")).unwrap();
+        assert_eq!(seed.world_size(), 2);
     }
 }

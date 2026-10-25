@@ -310,13 +310,7 @@ impl ElasticManager {
                     ))
                 })?;
 
-                let bind_addr: SocketAddr = if addr.is_ipv4() {
-                    "127.0.0.1:0"
-                } else {
-                    "[::1]:0"
-                }
-                .parse()
-                .expect("hardcoded socket addr");
+                let bind_addr = crate::cluster::worker::unspecified_for(addr);
 
                 let mut endpoint = quinn::Endpoint::client(bind_addr).map_err(|e| {
                     NexarError::transport_with_source("bind client for new peer", e)
