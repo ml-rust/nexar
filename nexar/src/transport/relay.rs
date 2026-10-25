@@ -3,41 +3,40 @@ use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
 use crate::transport::PeerConnection;
 use crate::transport::buffer_pool::PooledBuf;
+use crate::transport::lane::ControlKey;
+use crate::transport::mailbox::KeyedMailbox;
 use crate::types::{Priority, Rank};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Semaphore, mpsc};
 
-/// Channel capacity for relay delivery.
-const RELAY_CHANNEL_CAPACITY: usize = 256;
+/// Per-key queue depth for relay delivery.
+const RELAY_QUEUE_DEPTH: usize = 256;
 
-/// Manages relay delivery channels for messages arriving via intermediate hops.
+/// Most relayed messages that wait at once for room in their key's queue.
+const MAX_PENDING_DELIVERIES: usize = 1024;
+
+/// Manages relay delivery queues for messages arriving via intermediate hops.
 ///
 /// When a node receives a relayed message destined for itself, the relay listener
 /// deposits it here. Consumers (collectives, barrier, point-to-point) read from
-/// these channels as if the message came directly from the source.
+/// these queues as if the message came directly from the source.
+///
+/// Each queue is keyed by source rank and receive key, so a receiver takes
+/// only messages of its own key. Relayed messages cross several hops on
+/// separate streams: no order holds between them, not even within one key.
 pub struct RelayDeliveries {
-    /// Control messages delivered via relay: src_rank -> (sender, cached_receiver).
-    control: Mutex<HashMap<Rank, ControlEntry>>,
-    /// Tagged data delivered via relay: (src_rank, tag) -> (sender, cached_receiver).
-    tagged: Mutex<HashMap<(Rank, u64), TaggedEntry>>,
-}
-
-struct ControlEntry {
-    tx: mpsc::Sender<NexarMessage>,
-    rx: Arc<Mutex<mpsc::Receiver<NexarMessage>>>,
-}
-
-struct TaggedEntry {
-    tx: mpsc::Sender<PooledBuf>,
-    rx: Arc<Mutex<mpsc::Receiver<PooledBuf>>>,
+    control: KeyedMailbox<(Rank, ControlKey), NexarMessage>,
+    tagged: KeyedMailbox<(Rank, u64), PooledBuf>,
+    data: KeyedMailbox<(Rank, u32), Vec<u8>>,
 }
 
 impl Default for RelayDeliveries {
     fn default() -> Self {
         Self {
-            control: Mutex::new(HashMap::new()),
-            tagged: Mutex::new(HashMap::new()),
+            control: KeyedMailbox::new(RELAY_QUEUE_DEPTH),
+            tagged: KeyedMailbox::new(RELAY_QUEUE_DEPTH),
+            data: KeyedMailbox::new(RELAY_QUEUE_DEPTH),
         }
     }
 }
@@ -47,92 +46,49 @@ impl RelayDeliveries {
         Self::default()
     }
 
-    /// Get or create a control delivery sender for a source rank.
-    async fn control_tx(&self, src: Rank) -> mpsc::Sender<NexarMessage> {
-        let mut map = self.control.lock().await;
-        map.entry(src)
-            .or_insert_with(|| {
-                let (tx, rx) = mpsc::channel(RELAY_CHANNEL_CAPACITY);
-                ControlEntry {
-                    tx,
-                    rx: Arc::new(Mutex::new(rx)),
-                }
-            })
-            .tx
-            .clone()
-    }
-
-    /// Receive a control message delivered via relay from a source rank.
-    ///
-    /// The channel is persistent: multiple calls for the same source rank
-    /// will receive successive messages from the same channel.
-    pub async fn recv_control(&self, src: Rank) -> Result<NexarMessage> {
-        let rx = {
-            let mut map = self.control.lock().await;
-            let entry = map.entry(src).or_insert_with(|| {
-                let (tx, rx) = mpsc::channel(RELAY_CHANNEL_CAPACITY);
-                ControlEntry {
-                    tx,
-                    rx: Arc::new(Mutex::new(rx)),
-                }
-            });
-            Arc::clone(&entry.rx)
-        };
-        rx.lock()
-            .await
-            .recv()
+    /// Receive a relayed control message with key `key` from `src`.
+    pub async fn recv_control(&self, src: Rank, key: ControlKey) -> Result<NexarMessage> {
+        self.control
+            .recv(&(src, key))
             .await
             .ok_or(NexarError::PeerDisconnected { rank: src })
     }
 
-    /// Get or create a tagged delivery sender for a (src_rank, tag) pair.
-    async fn tagged_tx(&self, src: Rank, tag: u64) -> mpsc::Sender<PooledBuf> {
-        let mut map = self.tagged.lock().await;
-        map.entry((src, tag))
-            .or_insert_with(|| {
-                let (tx, rx) = mpsc::channel(RELAY_CHANNEL_CAPACITY);
-                TaggedEntry {
-                    tx,
-                    rx: Arc::new(Mutex::new(rx)),
-                }
-            })
-            .tx
-            .clone()
-    }
-
-    /// Receive tagged data delivered via relay.
-    ///
-    /// The channel is persistent: multiple calls for the same (src, tag) pair
-    /// will receive successive messages from the same channel.
+    /// Receive relayed tagged data from `src` on `tag`.
     pub async fn recv_tagged(&self, src: Rank, tag: u64) -> Result<PooledBuf> {
-        let rx = {
-            let mut map = self.tagged.lock().await;
-            let entry = map.entry((src, tag)).or_insert_with(|| {
-                let (tx, rx) = mpsc::channel(RELAY_CHANNEL_CAPACITY);
-                TaggedEntry {
-                    tx,
-                    rx: Arc::new(Mutex::new(rx)),
-                }
-            });
-            Arc::clone(&entry.rx)
-        };
-        rx.lock()
-            .await
-            .recv()
+        self.tagged
+            .recv(&(src, tag))
             .await
             .ok_or(NexarError::PeerDisconnected { rank: src })
     }
 
-    /// Deliver a control message that arrived via relay.
-    pub async fn deliver_control(&self, src: Rank, msg: NexarMessage) {
-        let tx = self.control_tx(src).await;
-        let _ = tx.send(msg).await;
+    /// Receive the payload of a relayed point-to-point `Data` message from
+    /// `src` on `tag`.
+    pub async fn recv_data(&self, src: Rank, tag: u32) -> Result<Vec<u8>> {
+        self.data
+            .recv(&(src, tag))
+            .await
+            .ok_or(NexarError::PeerDisconnected { rank: src })
     }
 
-    /// Deliver tagged data that arrived via relay.
+    /// Deliver a relayed framed message: `Data` to its tag, control
+    /// messages to their key. Waits while that key's queue is full.
+    pub async fn deliver_control(&self, src: Rank, msg: NexarMessage) {
+        if let NexarMessage::Data { tag, payload, .. } = msg {
+            let _ = self.data.send((src, tag), payload).await;
+            return;
+        }
+        match ControlKey::of(&msg) {
+            Some(key) => {
+                let _ = self.control.send((src, key), msg).await;
+            }
+            None => tracing::warn!(src, "relay: no receiver for {msg:?}, dropping"),
+        }
+    }
+
+    /// Deliver relayed tagged data. Waits while that tag's queue is full.
     pub async fn deliver_tagged(&self, src: Rank, tag: u64, data: PooledBuf) {
-        let tx = self.tagged_tx(src, tag).await;
-        let _ = tx.send(data).await;
+        let _ = self.tagged.send((src, tag), data).await;
     }
 }
 
@@ -263,6 +219,9 @@ pub fn start_relay_listeners(
     pool: Arc<crate::transport::buffer_pool::BufferPool>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
+    // Deliveries wait for room on tasks of their own, so one full key does
+    // not hold up the other keys from the same neighbor.
+    let pending = Arc::new(Semaphore::new(MAX_PENDING_DELIVERIES));
 
     for (neighbor_rank, mut relay_rx) in relay_receivers {
         let peers = Arc::clone(&peers);
@@ -270,6 +229,7 @@ pub fn start_relay_listeners(
         let deliveries = Arc::clone(&deliveries);
         let pool = Arc::clone(&pool);
         let strat = strategy.clone();
+        let pending = Arc::clone(&pending);
 
         handles.push(tokio::spawn(async move {
             while let Some(msg) = relay_rx.recv().await {
@@ -281,10 +241,17 @@ pub fn start_relay_listeners(
                 } = msg
                 {
                     if final_dest == my_rank {
+                        let Ok(permit) = Arc::clone(&pending).acquire_owned().await else {
+                            return;
+                        };
+                        let deliveries = Arc::clone(&deliveries);
                         if tag == 0 {
                             match rkyv::from_bytes::<NexarMessage, rkyv::rancor::Error>(payload) {
                                 Ok(inner) => {
-                                    deliveries.deliver_control(src_rank, inner).await;
+                                    tokio::spawn(async move {
+                                        deliveries.deliver_control(src_rank, inner).await;
+                                        drop(permit);
+                                    });
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -295,7 +262,10 @@ pub fn start_relay_listeners(
                             }
                         } else {
                             let buf = PooledBuf::from_vec(payload.clone(), Arc::clone(&pool));
-                            deliveries.deliver_tagged(src_rank, tag, buf).await;
+                            tokio::spawn(async move {
+                                deliveries.deliver_tagged(src_rank, tag, buf).await;
+                                drop(permit);
+                            });
                         }
                     } else {
                         relay_forward(

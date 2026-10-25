@@ -10,6 +10,9 @@ use std::time::Duration;
 /// Default for [`NexarConfig::max_frame_bytes`]: 4 GiB, the largest message the QUIC router accepts.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024 * 1024;
 
+/// Default for [`NexarConfig::recv_inflight_bytes`]: 4 GiB.
+pub const DEFAULT_RECV_INFLIGHT_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 /// Tuning parameters for collective operations and transport.
 #[derive(Debug, Clone)]
 pub struct NexarConfig {
@@ -57,16 +60,36 @@ pub struct NexarConfig {
     /// Only meaningful when `enable_tcp_bulk_sidecar` is `true`.
     pub encrypt_bulk_transport: bool,
 
-    /// Largest TCP bulk sidecar frame, in bytes, that this rank accepts.
+    /// Largest message, in bytes, that this rank accepts on the TCP bulk
+    /// sidecar and on QUIC streams.
     ///
-    /// A longer frame closes the sidecar, and receivers on it get
-    /// [`NexarError::FrameTooLarge`](crate::NexarError::FrameTooLarge). The
+    /// A longer sidecar frame closes the sidecar, and receivers on it get
+    /// [`NexarError::FrameTooLarge`](crate::NexarError::FrameTooLarge). The QUIC
+    /// router stops the stream of a longer message without allocating, logs the
+    /// same error, and the sender's write fails. The
     /// receiver reads a frame in steps and grows its buffer as data arrives, so
     /// a peer that announces a huge length allocates nothing until it sends the
     /// bytes. The default is 4 GiB, the largest message the QUIC router accepts,
     /// so every legitimate send fits. Lower it to cap memory per frame. Set the
     /// same value on every rank: a sender never splits a frame.
     pub max_frame_bytes: usize,
+
+    /// Messages each receive key queues per peer before backpressure.
+    ///
+    /// A receive key is one byte lane (raw, tagged, or point-to-point, per
+    /// communicator and tag) or one control key. A message past the depth
+    /// waits unread in its QUIC stream, and QUIC flow control slows its
+    /// sender. Other keys from the same peer go on. Values below 1 count as 1.
+    pub recv_queue_depth: usize,
+
+    /// Payload bytes the QUIC router of each peer reads at once.
+    ///
+    /// A message reserves its length before the router allocates its buffer. A
+    /// message that does not fit waits unread in its QUIC stream, and QUIC flow
+    /// control slows its sender. A message longer than this value reads alone.
+    /// The default is 4 GiB, the same as `max_frame_bytes`, so one largest
+    /// message reads at full speed. Lower it to cap receive memory per peer.
+    pub recv_inflight_bytes: usize,
 
     /// Maximum memory (in bytes) that compressed allreduce may allocate for
     /// buffering compressed chunks from all peers.
@@ -114,6 +137,8 @@ impl Default for NexarConfig {
             enable_tcp_bulk_sidecar: true,
             encrypt_bulk_transport: true,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            recv_queue_depth: crate::transport::router::DEFAULT_RECV_QUEUE_DEPTH,
+            recv_inflight_bytes: DEFAULT_RECV_INFLIGHT_BYTES,
             compressed_allreduce_max_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
             heartbeat_interval: Duration::from_secs(1),
             heartbeat_timeout: Duration::from_secs(5),
@@ -140,6 +165,8 @@ impl NexarConfig {
     /// - `NEXAR_ENABLE_TCP_BULK_SIDECAR` (default: true, set to "0" or "false" to disable)
     /// - `NEXAR_ENCRYPT_BULK_TRANSPORT` (default: true, set to "0" or "false" to disable)
     /// - `NEXAR_MAX_FRAME_BYTES` (default: 4 GiB)
+    /// - `NEXAR_RECV_QUEUE_DEPTH` (default: 256)
+    /// - `NEXAR_RECV_INFLIGHT_BYTES` (default: 4 GiB)
     /// - `NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES` (default: 4 GiB, set to "0" to disable)
     /// - `NEXAR_HEARTBEAT_INTERVAL_SECS` (default: 1)
     /// - `NEXAR_HEARTBEAT_TIMEOUT_SECS` (default: 5)
@@ -188,6 +215,16 @@ impl NexarConfig {
             && let Ok(n) = v.parse::<usize>()
         {
             cfg.max_frame_bytes = n;
+        }
+        if let Ok(v) = std::env::var("NEXAR_RECV_QUEUE_DEPTH")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.recv_queue_depth = n;
+        }
+        if let Ok(v) = std::env::var("NEXAR_RECV_INFLIGHT_BYTES")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.recv_inflight_bytes = n;
         }
         if let Ok(v) = std::env::var("NEXAR_COMPRESSED_ALLREDUCE_MAX_BYTES")
             && let Ok(n) = v.parse::<usize>()

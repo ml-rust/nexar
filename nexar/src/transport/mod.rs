@@ -1,13 +1,20 @@
 pub mod buffer_pool;
+pub(crate) mod byte_budget;
 mod connection;
+pub mod lane;
 mod listener;
+pub(crate) mod mailbox;
+pub(crate) mod notify_cell;
 pub mod relay;
 pub mod router;
+pub(crate) mod seq_inbox;
+pub(crate) mod seq_send;
 pub(crate) mod stream_pool;
 pub mod tcp_bulk;
 pub mod tls;
 
 pub use connection::{BulkTransport, PeerConnection};
+pub use lane::{ControlKey, LaneKey};
 pub use listener::TransportListener;
 pub use relay::RelayDeliveries;
 pub use router::PeerRouter;

@@ -1,8 +1,11 @@
+use super::lane::{LaneKey, STREAM_TAG_FRAMED, SeqHeader};
+use super::seq_send::SeqSend;
 use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
 use crate::protocol::codec::encode_message;
 use crate::types::{Priority, Rank};
 use futures::future::BoxFuture;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Trait for bulk transport accelerators (e.g. RDMA).
 ///
@@ -33,24 +36,16 @@ pub trait BulkTransport: Send + Sync + 'static {
     }
 }
 
-/// Stream type tag: first byte on every QUIC uni stream.
-/// Allows the router to dispatch streams to the correct channel without ambiguity.
-pub(crate) const STREAM_TAG_FRAMED: u8 = 0x01;
-pub(crate) const STREAM_TAG_RAW: u8 = 0x02;
-/// Raw stream with a communicator ID prefix (for split communicators).
-pub(crate) const STREAM_TAG_RAW_COMM: u8 = 0x03;
-/// Raw stream with a u64 tag prefix (for concurrent collectives / tagged transfers).
-pub(crate) const STREAM_TAG_RAW_TAGGED: u8 = 0x04;
-
 /// A connection to a single peer node, wrapping a QUIC connection.
 ///
 /// Handles the **send side** of communication. All receiving is done by
 /// `PeerRouter`, which runs a single `accept_uni` loop per peer and
 /// demultiplexes incoming streams into typed channels.
 ///
-/// Every outbound stream begins with a 1-byte stream type tag
-/// (`STREAM_TAG_FRAMED`, `STREAM_TAG_RAW`, or `STREAM_TAG_RAW_COMM`) so
-/// the remote router can dispatch it correctly.
+/// Every outbound stream begins with a 1-byte stream type tag, so the remote
+/// router can dispatch it. Byte messages (raw, tagged, point-to-point data)
+/// carry a sequence number from one counter per connection. The remote
+/// router uses it to deliver each [`LaneKey`] in send order.
 ///
 /// Transport accelerators (RDMA, GPUDirect) can attach state via the
 /// opaque `extensions` slot and provide extension traits for accelerated
@@ -63,6 +58,8 @@ pub struct PeerConnection {
     /// Opaque extension slot for transport accelerators (RDMA, GPUDirect).
     /// External crates attach typed state via `add_extension` / `extension`.
     extensions: std::sync::RwLock<Vec<Box<dyn std::any::Any + Send + Sync>>>,
+    /// Next sequence number of a byte message on this connection.
+    next_seq: AtomicU64,
 }
 
 /// Maximum number of pre-opened streams per peer.
@@ -77,6 +74,7 @@ impl PeerConnection {
             conn,
             stream_pool,
             extensions: std::sync::RwLock::new(Vec::new()),
+            next_seq: AtomicU64::new(0),
         }
     }
 
@@ -127,19 +125,30 @@ impl PeerConnection {
     /// Send a control message as a framed uni stream (always QUIC).
     pub async fn send_message(&self, msg: &NexarMessage, priority: Priority) -> Result<()> {
         let buf = encode_message(msg, priority)?;
-        self.send_framed(STREAM_TAG_FRAMED, &[], &buf).await
+        let mut stream = self.stream_pool.checkout().await?;
+        let mut head = [0u8; 9];
+        head[0] = STREAM_TAG_FRAMED;
+        head[1..].copy_from_slice(&(buf.len() as u64).to_le_bytes());
+        for (bytes, what) in [(&head[..], "write frame header"), (&buf[..], "write frame")] {
+            stream
+                .write_all(bytes)
+                .await
+                .map_err(|e| NexarError::transport_with_source(what, e))?;
+        }
+        stream
+            .finish()
+            .map_err(|e| NexarError::transport_with_source("finish stream", e))
     }
 
-    /// Send raw bytes on a new unidirectional stream (for bulk tensor data).
+    /// Send raw bytes on the untagged lane of the root communicator.
     pub async fn send_raw(&self, data: &[u8]) -> Result<()> {
-        self.send_framed(STREAM_TAG_RAW, &[], data).await
+        self.send_lane(LaneKey::Raw { comm_id: 0 }, data).await
     }
 
-    /// Send raw bytes tagged with a communicator ID (for split communicators).
+    /// Send raw bytes on the untagged lane of communicator `comm_id`.
     /// Always uses QUIC (split comms are a logical overlay).
     pub async fn send_raw_comm(&self, comm_id: u64, data: &[u8]) -> Result<()> {
-        self.send_framed(STREAM_TAG_RAW_COMM, &comm_id.to_le_bytes(), data)
-            .await
+        self.send_lane(LaneKey::Raw { comm_id }, data).await
     }
 
     /// Send raw bytes using the best available transport.
@@ -167,78 +176,68 @@ impl PeerConnection {
         self.send_raw(data).await
     }
 
-    /// Send raw bytes with a u64 tag on a new unidirectional stream.
-    ///
-    /// Wire format: `[0x04][tag: u64 LE][len: u64 LE][payload]`.
-    /// Used by concurrent collectives to avoid cross-talk on the raw lane.
+    /// Send raw bytes on tag `tag` of the root communicator.
     pub async fn send_raw_tagged(&self, tag: u64, data: &[u8]) -> Result<()> {
-        self.send_framed(STREAM_TAG_RAW_TAGGED, &tag.to_le_bytes(), data)
+        self.send_lane(LaneKey::Tagged { comm_id: 0, tag }, data)
             .await
     }
 
-    /// Send tagged bytes using the best available transport.
-    ///
-    /// Tries `TaggedBulkTransport` first (e.g., TCP sidecar which carries tags
-    /// natively), then falls back to QUIC tagged send. Plain `BulkTransport`
-    /// (RDMA) is NOT used here because it doesn't carry tags.
+    /// Send tagged bytes of the root communicator using the best available
+    /// transport. See [`send_lane_best_effort`](Self::send_lane_best_effort).
     pub async fn send_raw_tagged_best_effort(&self, tag: u64, data: &[u8]) -> Result<()> {
-        let tagged_bulk: Option<std::sync::Arc<dyn super::TaggedBulkTransport>> = self
-            .extension::<std::sync::Arc<dyn super::TaggedBulkTransport>>()?
-            .map(|b| std::sync::Arc::clone(&*b));
-        if let Some(bulk) = tagged_bulk {
-            match bulk.send_bulk_tagged(tag, data).await {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    tracing::warn!(
-                        peer = self.rank,
-                        tag,
-                        bytes = data.len(),
-                        error = %e,
-                        "tagged bulk transport send failed, falling back to QUIC"
-                    );
+        self.send_lane_best_effort(LaneKey::Tagged { comm_id: 0, tag }, data)
+            .await
+    }
+
+    /// Send `data` on `lane` over QUIC, as the next message of this connection.
+    ///
+    /// Wire format: `[0x05][kind: u8][comm_id: u64][tag: u64][seq: u64][len: u64][payload]`,
+    /// little-endian. The remote router delivers the messages of one lane in
+    /// the order their sends took a sequence number. A send that fails or is
+    /// cancelled sends a skip notice, so later messages do not wait for it.
+    pub async fn send_lane(&self, lane: LaneKey, data: &[u8]) -> Result<()> {
+        let stream = self.stream_pool.checkout().await?;
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let mut send = SeqSend::new(stream, seq, self.conn.clone());
+        let header = SeqHeader::encode(lane, seq, data.len() as u64);
+        send.write(&header, "write lane header").await?;
+        send.write(data, "write payload").await?;
+        send.finish()
+    }
+
+    /// Send on `lane` using the best available transport.
+    ///
+    /// A tagged lane tries `TaggedBulkTransport` first (e.g. the TCP sidecar,
+    /// which carries tags natively, see [`LaneKey::sidecar_tag`]), then falls
+    /// back to QUIC. Plain `BulkTransport` (RDMA) is NOT used here because it
+    /// doesn't carry tags. Other lanes always use QUIC.
+    pub async fn send_lane_best_effort(&self, lane: LaneKey, data: &[u8]) -> Result<()> {
+        if let LaneKey::Tagged { comm_id, tag } = lane {
+            let tagged_bulk: Option<std::sync::Arc<dyn super::TaggedBulkTransport>> = self
+                .extension::<std::sync::Arc<dyn super::TaggedBulkTransport>>()?
+                .map(|b| std::sync::Arc::clone(&*b));
+            if let Some(bulk) = tagged_bulk {
+                let wire_tag = LaneKey::sidecar_tag(comm_id, tag);
+                match bulk.send_bulk_tagged(wire_tag, data).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        tracing::warn!(
+                            peer = self.rank,
+                            tag,
+                            bytes = data.len(),
+                            error = %e,
+                            "tagged bulk transport send failed, falling back to QUIC"
+                        );
+                    }
                 }
             }
         }
-        self.send_raw_tagged(tag, data).await
+        self.send_lane(lane, data).await
     }
 
     /// Get the remote address of this connection.
     pub fn remote_addr(&self) -> std::net::SocketAddr {
         self.conn.remote_address()
-    }
-
-    /// Open a uni stream, write `[stream_tag][prefix][len][payload]`, then finish.
-    ///
-    /// All QUIC send methods delegate here. The `prefix` carries per-format
-    /// metadata (comm_id for split comms, u64 tag for tagged sends, empty for
-    /// plain framed/raw sends).
-    ///
-    /// Uses the stream pool to avoid `open_uni()` latency when pre-opened
-    /// streams are available.
-    async fn send_framed(&self, stream_tag: u8, prefix: &[u8], data: &[u8]) -> Result<()> {
-        let mut stream = self.stream_pool.checkout().await?;
-        stream
-            .write_all(&[stream_tag])
-            .await
-            .map_err(|e| NexarError::transport_with_source("write stream tag", e))?;
-        if !prefix.is_empty() {
-            stream
-                .write_all(prefix)
-                .await
-                .map_err(|e| NexarError::transport_with_source("write prefix", e))?;
-        }
-        stream
-            .write_all(&(data.len() as u64).to_le_bytes())
-            .await
-            .map_err(|e| NexarError::transport_with_source("write length", e))?;
-        stream
-            .write_all(data)
-            .await
-            .map_err(|e| NexarError::transport_with_source("write payload", e))?;
-        stream
-            .finish()
-            .map_err(|e| NexarError::transport_with_source("finish stream", e))?;
-        Ok(())
     }
 }
 

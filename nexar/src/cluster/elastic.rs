@@ -8,6 +8,7 @@ use crate::cluster::seed::PendingJoin;
 use crate::config::NexarConfig;
 use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
+use crate::transport::lane::ControlKey;
 use crate::transport::tls::make_client_config_mtls;
 use crate::transport::{PeerConnection, TransportListener};
 use crate::types::{Priority, Rank};
@@ -209,7 +210,8 @@ impl ElasticManager {
 
         // Collect ElasticCheckpoint from all existing ranks 1..world_size.
         for src_rank in 1..old_world_size {
-            let msg = tokio::time::timeout(timeout, client.recv_control(src_rank))
+            let key = ControlKey::ElasticCheckpoint { epoch };
+            let msg = tokio::time::timeout(timeout, client.recv_control(src_rank, key))
                 .await
                 .map_err(|_| NexarError::ElasticTimeout {
                     epoch,
@@ -263,7 +265,8 @@ impl ElasticManager {
         let peer0 = client.peer(0)?;
         peer0.send_message(&checkpoint, Priority::Critical).await?;
 
-        let ack_msg = tokio::time::timeout(timeout, client.recv_control(0))
+        let key = ControlKey::ElasticCheckpointAck { epoch };
+        let ack_msg = tokio::time::timeout(timeout, client.recv_control(0, key))
             .await
             .map_err(|_| NexarError::ElasticTimeout {
                 epoch,

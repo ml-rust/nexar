@@ -3,21 +3,17 @@ use crate::cluster::sparse::RoutingTable;
 use crate::config::NexarConfig;
 use crate::device::DeviceAdapter;
 use crate::error::{NexarError, Result};
-use crate::protocol::NexarMessage;
 use crate::rpc::RpcDispatcher;
 use crate::rpc::registry::{RpcHandler, RpcRegistry};
 use crate::transport::PeerConnection;
-use crate::transport::buffer_pool::{BufferPool, PoolProfile, PooledBuf};
+use crate::transport::buffer_pool::{BufferPool, PoolProfile};
 use crate::transport::relay::RelayDeliveries;
-use crate::transport::router::PeerRouter;
-use crate::types::{Priority, Rank};
+use crate::transport::router::{PeerRouter, RouterLimits};
+use crate::types::Rank;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock, watch};
-
-/// Cached tagged receiver map: (original_rank, tag) -> shared Receiver.
-type TaggedReceiverMap = HashMap<(Rank, u64), Arc<Mutex<tokio::sync::mpsc::Receiver<PooledBuf>>>>;
+use tokio::sync::{RwLock, watch};
 
 /// Return type for [`NexarClient::spawn_monitor`]: (failure_tx, failure_rx, monitor_handle).
 type MonitorParts = (
@@ -26,21 +22,13 @@ type MonitorParts = (
     tokio::task::JoinHandle<()>,
 );
 
-/// Abstraction over raw byte receive channels.
-/// Default clients use the router's raw lane; split clients use per-comm_id channels.
-pub(super) enum RawRecvSource {
-    /// Default communicator: recv from router's raw lane.
-    Router,
-    /// Split communicator: recv from per-comm_id channels.
-    Comm(HashMap<Rank, Mutex<tokio::sync::mpsc::Receiver<PooledBuf>>>),
-}
-
 /// The main async API for nexar distributed communication.
 ///
 /// Holds peer connections (for sending) and per-peer routers (for receiving).
 /// The routers run as background tasks that demultiplex incoming QUIC streams
-/// into typed channels, preventing races between consumers (RPC, barrier,
-/// collectives) that would otherwise steal each other's messages.
+/// by receive key. A receive takes only messages of its own key: its
+/// communicator, its lane, and its tag. Messages of one key from one peer
+/// arrive in send order. See [`PeerRouter`] for the exact guarantees.
 ///
 /// # Example
 ///
@@ -66,10 +54,9 @@ pub struct NexarClient {
     pub(super) comm_id: u64,
     /// Sending side: one `PeerConnection` per remote rank.
     pub(crate) peers: HashMap<Rank, Arc<PeerConnection>>,
-    /// Receiving side: one `PeerRouter` per remote rank.
-    pub(super) routers: HashMap<Rank, PeerRouter>,
-    /// How this client receives raw bytes.
-    pub(super) raw_recv: RawRecvSource,
+    /// Receiving side: one `PeerRouter` per remote rank, keyed by original
+    /// rank. Split and rebuilt clients share the parent's routers.
+    pub(super) routers: HashMap<Rank, Arc<PeerRouter>>,
     /// Background tasks; kept alive for the lifetime of this client.
     pub(super) _router_handles: Vec<tokio::task::JoinHandle<Result<()>>>,
     pub(super) adapter: Arc<dyn DeviceAdapter>,
@@ -84,8 +71,6 @@ pub struct NexarClient {
     pub(super) rank_map: HashMap<Rank, Rank>,
     /// Counter for generating unique collective tags.
     pub(super) collective_tag: AtomicU64,
-    /// Cached receivers for tagged channels.
-    pub(super) tagged_receivers: Mutex<TaggedReceiverMap>,
     /// Runtime configuration (timeouts, thresholds).
     pub(crate) config: Arc<NexarConfig>,
     /// Sender for failure notifications (health monitor writes here).
@@ -197,16 +182,21 @@ impl NexarClient {
         config: NexarConfig,
     ) -> Self {
         let mut peer_arcs: HashMap<Rank, Arc<PeerConnection>> = HashMap::new();
-        let mut routers: HashMap<Rank, PeerRouter> = HashMap::new();
+        let mut routers: HashMap<Rank, Arc<PeerRouter>> = HashMap::new();
         let mut handles = Vec::new();
 
         let mesh = Arc::new(super::shutdown::MeshOwner::default());
         for (peer_rank, peer_conn) in peers {
             let conn_clone = peer_conn.conn.clone();
             mesh.add_conn(peer_conn.conn.clone());
-            let (router, handle) = PeerRouter::spawn(peer_rank, conn_clone, Arc::clone(&pool));
+            let (router, handle) = PeerRouter::spawn_with_limits(
+                peer_rank,
+                conn_clone,
+                Arc::clone(&pool),
+                RouterLimits::from(&config),
+            );
             peer_arcs.insert(peer_rank, Arc::new(peer_conn));
-            routers.insert(peer_rank, router);
+            routers.insert(peer_rank, Arc::new(router));
             handles.push(handle);
         }
 
@@ -218,7 +208,6 @@ impl NexarClient {
             comm_id: 0,
             peers: peer_arcs,
             routers,
-            raw_recv: RawRecvSource::Router,
             _router_handles: handles,
             adapter,
             _pool: pool,
@@ -228,7 +217,6 @@ impl NexarClient {
             split_generation: AtomicU64::new(0),
             rank_map: HashMap::new(),
             collective_tag: AtomicU64::new(1),
-            tagged_receivers: Mutex::new(HashMap::new()),
             config: Arc::new(config),
             failure_tx,
             failure_rx,
@@ -306,79 +294,6 @@ impl NexarClient {
     /// For the root communicator, this is identity.
     pub(super) fn resolve_rank(&self, rank: Rank) -> Rank {
         self.rank_map.get(&rank).copied().unwrap_or(rank)
-    }
-
-    /// Send tagged data to a specific rank.
-    ///
-    /// # Safety
-    /// `data_ptr` must be valid for `size` bytes.
-    pub async unsafe fn send(
-        &self,
-        data_ptr: u64,
-        size: usize,
-        dest: Rank,
-        tag: u32,
-    ) -> Result<()> {
-        if dest >= self.world_size {
-            return Err(NexarError::InvalidRank {
-                rank: dest,
-                world_size: self.world_size,
-            });
-        }
-
-        let data = unsafe { self.adapter.stage_for_send(data_ptr, size)? };
-
-        let msg = NexarMessage::Data {
-            tag,
-            src_rank: self.rank,
-            payload: data,
-        };
-        self.send_message_to(dest, &msg, Priority::Bulk).await
-    }
-
-    /// Receive tagged data from a specific rank.
-    ///
-    /// # Safety
-    /// `buf_ptr` must be valid for `size` bytes.
-    pub async unsafe fn recv(&self, buf_ptr: u64, size: usize, src: Rank, tag: u32) -> Result<()> {
-        if src >= self.world_size {
-            return Err(NexarError::InvalidRank {
-                rank: src,
-                world_size: self.world_size,
-            });
-        }
-
-        // For non-neighbor sources in sparse topology, receive via relay.
-        let msg = if !self.has_direct_peer(src) && self.relay_deliveries.is_some() {
-            self.recv_control_from(src).await?
-        } else {
-            self.recv_data_message(src).await?
-        };
-
-        match msg {
-            NexarMessage::Data {
-                tag: recv_tag,
-                payload,
-                ..
-            } => {
-                if recv_tag != tag {
-                    return Err(NexarError::DecodeFailed(format!(
-                        "tag mismatch: expected {tag}, got {recv_tag}"
-                    )));
-                }
-                if payload.len() != size {
-                    return Err(NexarError::BufferSizeMismatch {
-                        expected: size,
-                        actual: payload.len(),
-                    });
-                }
-                unsafe { self.adapter.receive_to_device(&payload, buf_ptr)? };
-                Ok(())
-            }
-            other => Err(NexarError::DecodeFailed(format!(
-                "expected Data message, got {other:?}"
-            ))),
-        }
     }
 
     /// Get a receiver that notifies when peers are detected as failed.

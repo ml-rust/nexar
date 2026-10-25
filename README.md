@@ -174,7 +174,7 @@ The client also exposes `all_reduce_host`, `all_reduce_device`, and the other `_
 
 ## Features
 
-- **Point-to-point:** tagged `send` and `recv` between any two ranks.
+- **Point-to-point:** tagged `send` and `recv` between any two ranks. A receive takes only its own tag, in send order. See [Receive semantics](#receive-semantics).
 - **Elastic membership:** `rebuild_adding` and `rebuild_excluding` change the communicator at run time.
 - **Fault recovery:** `RecoveryPolicy::Automatic`, `Manual`, or `Abort`. Healthy ranks agree on the failed set and rebuild.
 - **Sparse topologies:** `TopologyStrategy::FullMesh`, `KRegular { degree }`, and `Hypercube`. Traffic to non-neighbors relays through peers.
@@ -217,28 +217,40 @@ seed node (discovery only, no data routing)
 
 Workers connect to the seed to get a rank, a certificate, and the peer table. They then open direct mTLS QUIC connections to their peers. The seed is not on the data path.
 
-Each peer connection runs a router. The router accepts incoming QUIC streams and sends each one to a typed lane:
+Each peer connection runs a router. The router accepts incoming QUIC streams and sends each message to the receiver of its key:
 
-| Lane            | Traffic                            | Consumer                      |
-| --------------- | ---------------------------------- | ----------------------------- |
-| `rpc_requests`  | Incoming RPC calls                 | Dispatcher serve loop         |
-| `rpc_responses` | RPC replies, matched by request ID | `rpc()` caller via oneshot    |
-| `control`       | Barrier, heartbeat, join and leave | Barrier logic, health monitor |
-| `data`          | Point-to-point `send` and `recv`   | Application code              |
-| `raw`           | Bulk byte streams                  | Tensor transfers              |
+| Receive key                            | Traffic                                    | Order within the key   |
+| -------------------------------------- | ------------------------------------------ | ---------------------- |
+| `LaneKey::Data { comm_id, tag }`       | Point-to-point `send` / `recv`, `_iov`     | Send order (FIFO)      |
+| `LaneKey::Tagged { comm_id, tag }`     | `send_bytes_tagged` / `recv_bytes_tagged`  | Send order (FIFO)      |
+| `LaneKey::Raw { comm_id }`             | `send_bytes` / `recv_bytes`                | Send order (FIFO)      |
+| `ControlKey` (barrier epoch, recovery) | Barrier, recovery, elastic checkpoints     | None; epochs keep apart |
+| RPC requests, responses by request ID  | `rpc` calls and replies                    | None                   |
 
-Each lane has its own bounded channel.
+### Receive semantics
+
+- A receive for `(src, key)` waits for a message with that key from `src`. It never takes, or fails on, a message with another key. That message stays queued for its own receiver.
+- Ordered: the messages of one byte lane from one sender, in the order their sends started on the connection. Each communicator (root, split, rebuilt) has its own tag space.
+- Not ordered: different keys, different senders, control messages within one key, and traffic that relays through other ranks in a sparse topology.
+- Each key queues `NexarConfig::recv_queue_depth` messages per peer (default 256). A message past that waits unread in its QUIC stream, and QUIC flow control slows its sender. Other keys from the same peer go on while the peer's open streams stay under the QUIC limit of 1024.
+- A send that fails or is cancelled does not stall the lane. The sender reports its sequence number in a skip notice, and later messages pass it.
+- When a peer disconnects, receivers first get the complete messages already queued, then `NexarError::PeerDisconnected`.
+- A message longer than `NexarConfig::max_frame_bytes` is refused before any allocation: the router stops its stream, logs `FrameTooLarge`, and the sender's write fails. The router of each peer reads at most `NexarConfig::recv_inflight_bytes` of payload at once (default 4 GiB). A message past that waits unread in its QUIC stream. A message longer than the budget reads alone.
+- The receiver refuses a sequence number 65536 or more past the lowest unknown one. A hostile peer cannot grow the reorder state.
+- Receives are cancel-safe: a receive dropped by a timeout consumes nothing.
+- The TCP bulk sidecar that collectives use is one ordered TCP stream per peer. A lagging tag on it delays the tags behind it.
 
 ### Stream protocol
 
 Each QUIC unidirectional stream starts with a 1-byte tag:
 
-| Tag    | Stream content                                                                |
-| ------ | ----------------------------------------------------------------------------- |
-| `0x01` | Framed message: 8-byte little-endian length, then a serialized `NexarMessage` |
-| `0x02` | Raw bytes: 8-byte little-endian length, then the payload                      |
-| `0x03` | Raw bytes for a split communicator: `comm_id` prefix, then length and payload |
-| `0x04` | Raw bytes for a tagged send: tag prefix, then length and payload              |
+| Tag    | Stream content                                                                                                       |
+| ------ | -------------------------------------------------------------------------------------------------------------------- |
+| `0x01` | Framed message: 8-byte length, then a serialized `NexarMessage`                                                      |
+| `0x05` | Sequenced bytes: lane kind (1 byte), `comm_id` (8), tag (8), sequence number (8), length (8), then the payload       |
+| `0x06` | Skip notice: count (4 bytes), then that many 8-byte sequence numbers the sender abandoned                             |
+
+Integers are little-endian. One counter per connection numbers every sequenced message.
 
 Messages use rkyv serialization.
 

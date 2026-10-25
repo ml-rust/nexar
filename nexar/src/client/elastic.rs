@@ -2,15 +2,14 @@ use crate::cluster::sparse::recompute_routing_table;
 use crate::error::{NexarError, Result};
 use crate::rpc::registry::RpcRegistry;
 use crate::transport::PeerConnection;
-use crate::transport::router::PeerRouter;
+use crate::transport::router::{PeerRouter, RouterLimits};
 use crate::types::Rank;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use super::NexarClient;
-use super::async_client::RawRecvSource;
 use super::hash::fnv1a_comm_id;
 
 impl NexarClient {
@@ -19,8 +18,8 @@ impl NexarClient {
     /// New ranks are appended after the existing world (no remapping of existing ranks).
     /// Returns a new `NexarClient` with `world_size += new_peers.len()`.
     ///
-    /// The new client shares the parent's QUIC connections and routers. It uses
-    /// per-comm_id raw channels so its collectives don't interfere with the parent.
+    /// The new client shares the parent's QUIC connections and routers. Its
+    /// own comm_id keeps its receive keys apart from the parent's.
     ///
     /// For sparse topologies, relay infrastructure is inherited from the parent for
     /// existing peers and set up for new peers automatically.
@@ -49,38 +48,35 @@ impl NexarClient {
 
         // Merge existing peers + new peers.
         let mut merged_peers = HashMap::new();
-        let mut comm_receivers = HashMap::new();
+        // Existing ranks keep their number; their routers are shared.
+        let mut rank_map = HashMap::new();
+        let mut routers = HashMap::new();
 
         // Keep existing peers (keyed by their current rank, which stays the same).
         for (&peer_rank, peer) in &self.peers {
             merged_peers.insert(peer_rank, Arc::clone(peer));
-
-            if let Some(router) = self.routers.get(&peer_rank) {
-                let rx = router.register_comm(new_comm_id).await;
-                comm_receivers.insert(peer_rank, Mutex::new(rx));
+            let global = self.resolve_rank(peer_rank);
+            rank_map.insert(peer_rank, global);
+            if let Some(router) = self.routers.get(&global) {
+                routers.insert(global, Arc::clone(router));
             }
         }
 
         // Add new peers and spawn routers for them.
-        let mut new_routers = HashMap::new();
         let mut new_router_handles = Vec::new();
         for (rank, peer) in new_peers {
             let conn_clone = peer.conn.clone();
             self.mesh.add_conn(peer.conn.clone());
-            let (router, handle) = PeerRouter::spawn(rank, conn_clone, Arc::clone(&self._pool));
-            let rx = router.register_comm(new_comm_id).await;
-            comm_receivers.insert(rank, Mutex::new(rx));
-            new_routers.insert(rank, router);
+            let (router, handle) = PeerRouter::spawn_with_limits(
+                rank,
+                conn_clone,
+                Arc::clone(&self._pool),
+                RouterLimits::from(&*self.config),
+            );
+            routers.insert(rank, Arc::new(router));
+            rank_map.insert(rank, rank);
             new_router_handles.push(handle);
             merged_peers.insert(rank, peer);
-        }
-
-        // Rank map: identity mapping (no remapping for grow).
-        let mut rank_map = HashMap::new();
-        for r in 0..new_world_size {
-            if r != self.rank {
-                rank_map.insert(r, r);
-            }
         }
 
         let routing_table =
@@ -95,8 +91,7 @@ impl NexarClient {
             world_size: new_world_size,
             comm_id: new_comm_id,
             peers: merged_peers,
-            routers: new_routers,
-            raw_recv: RawRecvSource::Comm(comm_receivers),
+            routers,
             _router_handles: new_router_handles,
             adapter: Arc::clone(&self.adapter),
             _pool: Arc::clone(&self._pool),
@@ -106,7 +101,6 @@ impl NexarClient {
             split_generation: AtomicU64::new(0),
             rank_map,
             collective_tag: AtomicU64::new(1),
-            tagged_receivers: Mutex::new(HashMap::new()),
             config: Arc::clone(&self.config),
             failure_tx: Arc::clone(&self.failure_tx),
             failure_rx: self.failure_rx.clone(),

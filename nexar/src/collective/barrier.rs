@@ -2,6 +2,7 @@ use crate::client::NexarClient;
 use crate::collective::helpers::ceil_log2;
 use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
+use crate::transport::lane::ControlKey;
 use crate::types::Priority;
 use std::time::Duration;
 
@@ -42,7 +43,8 @@ async fn two_phase_barrier(client: &NexarClient, timeout: Duration) -> Result<()
     if rank == 0 {
         // Rank 0: collect barriers from all other ranks.
         for r in 1..world {
-            let msg = tokio::time::timeout(timeout, client.recv_control_from(r))
+            let key = ControlKey::Barrier { comm_id, epoch };
+            tokio::time::timeout(timeout, client.recv_control_from(r, key))
                 .await
                 .map_err(|_| NexarError::CollectiveFailed {
                     operation: "barrier",
@@ -57,22 +59,6 @@ async fn two_phase_barrier(client: &NexarClient, timeout: Duration) -> Result<()
                     rank: r,
                     reason: e.to_string(),
                 })?;
-
-            match msg {
-                NexarMessage::Barrier {
-                    epoch: e,
-                    comm_id: c,
-                } if e == epoch && c == comm_id => {}
-                other => {
-                    return Err(NexarError::CollectiveFailed {
-                        operation: "barrier",
-                        rank: r,
-                        reason: format!(
-                            "expected Barrier(epoch={epoch}, comm_id={comm_id}), got {other:?}"
-                        ),
-                    });
-                }
-            }
         }
 
         // Broadcast BarrierAck.
@@ -99,7 +85,8 @@ async fn two_phase_barrier(client: &NexarClient, timeout: Duration) -> Result<()
                 reason: e.to_string(),
             })?;
 
-        let ack = tokio::time::timeout(timeout, client.recv_control_from(0))
+        let key = ControlKey::BarrierAck { comm_id, epoch };
+        tokio::time::timeout(timeout, client.recv_control_from(0, key))
             .await
             .map_err(|_| NexarError::CollectiveFailed {
                 operation: "barrier",
@@ -114,22 +101,6 @@ async fn two_phase_barrier(client: &NexarClient, timeout: Duration) -> Result<()
                 rank: 0,
                 reason: e.to_string(),
             })?;
-
-        match ack {
-            NexarMessage::BarrierAck {
-                epoch: e,
-                comm_id: c,
-            } if e == epoch && c == comm_id => {}
-            other => {
-                return Err(NexarError::CollectiveFailed {
-                    operation: "barrier",
-                    rank: 0,
-                    reason: format!(
-                        "expected BarrierAck(epoch={epoch}, comm_id={comm_id}), got {other:?}"
-                    ),
-                });
-            }
-        }
     }
 
     Ok(())
@@ -174,7 +145,8 @@ async fn dissemination_barrier(client: &NexarClient, timeout: Duration) -> Resul
         };
 
         let recv_fut = async {
-            let received = tokio::time::timeout(timeout, client.recv_control_from(recv_from))
+            let key = ControlKey::Barrier { comm_id, epoch };
+            tokio::time::timeout(timeout, client.recv_control_from(recv_from, key))
                 .await
                 .map_err(|_| NexarError::CollectiveFailed {
                     operation: "barrier",
@@ -189,20 +161,7 @@ async fn dissemination_barrier(client: &NexarClient, timeout: Duration) -> Resul
                     rank: recv_from,
                     reason: e.to_string(),
                 })?;
-
-            match received {
-                NexarMessage::Barrier {
-                    epoch: e,
-                    comm_id: c,
-                } if e == epoch && c == comm_id => Ok(()),
-                other => Err(NexarError::CollectiveFailed {
-                    operation: "barrier",
-                    rank: recv_from,
-                    reason: format!(
-                        "expected Barrier(epoch={epoch}, comm_id={comm_id}), got {other:?}"
-                    ),
-                }),
-            }
+            Ok(())
         };
 
         tokio::try_join!(send_fut, recv_fut)?;

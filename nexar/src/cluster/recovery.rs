@@ -6,6 +6,7 @@
 use crate::client::NexarClient;
 use crate::error::{NexarError, Result};
 use crate::protocol::NexarMessage;
+use crate::transport::lane::ControlKey;
 use crate::types::{Priority, Rank};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -323,33 +324,25 @@ async fn run_follower_agreement(
     Ok(agreed)
 }
 
-/// Receive a `RecoveryVote` from `src`, skipping non-recovery control messages.
+/// Receive a `RecoveryVote` from `src`. Other control messages stay queued.
 async fn recv_recovery_vote(client: &NexarClient, src: Rank) -> Result<Vec<Rank>> {
-    loop {
-        let msg = client.recv_control(src).await?;
-        match msg {
-            NexarMessage::RecoveryVote { dead_ranks, .. } => return Ok(dead_ranks),
-            NexarMessage::Heartbeat { .. } | NexarMessage::NodeLeft { .. } => continue,
-            other => {
-                tracing::warn!(src, "expected RecoveryVote, got {other:?}, skipping");
-            }
-        }
+    match client.recv_control(src, ControlKey::RecoveryVote).await? {
+        NexarMessage::RecoveryVote { dead_ranks, .. } => Ok(dead_ranks),
+        other => Err(NexarError::DecodeFailed(format!(
+            "control key RecoveryVote carried {other:?}"
+        ))),
     }
 }
 
-/// Receive a `RecoveryAgreement` from `leader`, skipping non-recovery control messages.
+/// Receive a `RecoveryAgreement` from `leader`. Other control messages stay queued.
 async fn recv_recovery_agreement(client: &NexarClient, leader: Rank) -> Result<Vec<Rank>> {
-    loop {
-        let msg = client.recv_control(leader).await?;
-        match msg {
-            NexarMessage::RecoveryAgreement { dead_ranks, .. } => return Ok(dead_ranks),
-            NexarMessage::Heartbeat { .. } | NexarMessage::NodeLeft { .. } => continue,
-            other => {
-                tracing::warn!(
-                    leader,
-                    "expected RecoveryAgreement, got {other:?}, skipping"
-                );
-            }
-        }
+    match client
+        .recv_control(leader, ControlKey::RecoveryAgreement)
+        .await?
+    {
+        NexarMessage::RecoveryAgreement { dead_ranks, .. } => Ok(dead_ranks),
+        other => Err(NexarError::DecodeFailed(format!(
+            "control key RecoveryAgreement carried {other:?}"
+        ))),
     }
 }

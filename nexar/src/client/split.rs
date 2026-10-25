@@ -4,10 +4,9 @@ use crate::types::Rank;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use super::NexarClient;
-use super::async_client::RawRecvSource;
 use super::hash::fnv1a_comm_id;
 
 impl NexarClient {
@@ -118,48 +117,38 @@ impl NexarClient {
             &my_color.to_le_bytes(),
         ]);
 
-        // Step 5: Build rank_map (new_rank -> original_rank) and peer subset.
+        // Step 5: Build rank_map (new_rank -> global rank) and peer subset.
         let mut rank_map = HashMap::new();
         let mut new_peers = HashMap::new();
-        let mut comm_receivers = HashMap::new();
+        let mut routers = HashMap::new();
 
         for (new_r, &(orig_rank, _)) in group.iter().enumerate() {
             let new_r = new_r as Rank;
-            rank_map.insert(new_r, orig_rank);
+            let global = self.resolve_rank(orig_rank);
+            rank_map.insert(new_r, global);
 
             if orig_rank != rank {
-                // Share the parent's PeerConnection (keyed by original rank).
+                // Share the parent's PeerConnection (keyed by the parent's rank).
                 let peer = self.peer(orig_rank)?;
                 new_peers.insert(new_r, Arc::clone(peer));
-
-                // Register a per-comm_id channel on the parent's router for this peer.
-                let original_rank_key = orig_rank;
-                let router =
-                    self.routers
-                        .get(&original_rank_key)
-                        .ok_or(NexarError::UnknownPeer {
-                            rank: original_rank_key,
-                        })?;
-                let rx = router.register_comm(new_comm_id).await;
-                comm_receivers.insert(new_r, Mutex::new(rx));
+                let router = self
+                    .routers
+                    .get(&global)
+                    .ok_or(NexarError::UnknownPeer { rank: orig_rank })?;
+                routers.insert(global, Arc::clone(router));
             }
         }
 
-        // Step 6: Build the split client. It shares the parent's routers
-        // but uses comm-specific raw channels.
-        // Note: The split client doesn't own routers or router handles — it
-        // borrows the parent's routers indirectly through the registered comm channels.
-        // Control/data/RPC lanes are still on the parent's routers.
-        // Split clients don't have their own routers — they use comm channels for
-        // collective raw data. Barrier uses comm_id in the message to avoid cross-talk.
+        // Step 6: Build the split client. It shares the parent's routers.
+        // Every receive key carries the comm_id, so the two never take each
+        // other's messages.
 
         Ok(NexarClient {
             rank: new_rank,
             world_size: new_world_size,
             comm_id: new_comm_id,
             peers: new_peers,
-            routers: HashMap::new(), // Split clients don't own routers
-            raw_recv: RawRecvSource::Comm(comm_receivers),
+            routers,
             _router_handles: Vec::new(),
             adapter: Arc::clone(&self.adapter),
             _pool: Arc::clone(&self._pool),
@@ -169,7 +158,6 @@ impl NexarClient {
             split_generation: AtomicU64::new(0),
             rank_map,
             collective_tag: AtomicU64::new(1),
-            tagged_receivers: tokio::sync::Mutex::new(HashMap::new()),
             config: Arc::clone(&self.config),
             failure_tx: Arc::clone(&self.failure_tx),
             failure_rx: self.failure_rx.clone(),
@@ -179,5 +167,29 @@ impl NexarClient {
             _relay_handles: Vec::new(), // Split clients share the parent's relay
             mesh: Arc::clone(&self.mesh),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::client::bootstrap::{local_pair, shutdown_pair};
+
+    #[tokio::test]
+    async fn test_split_and_parent_tags_stay_apart_over_quic() {
+        let (a, b) = local_pair(16).await;
+        let (sa, sb) = tokio::join!(a.split(0, 0), b.split(0, 1));
+        let (sa, sb) = (sa.unwrap(), sb.unwrap());
+        // Same tag on both communicators; the split one is sent first.
+        sa.send_bytes_tagged(1, 7, b"split").await.unwrap();
+        a.send_bytes_tagged(1, 7, b"parent").await.unwrap();
+        assert_eq!(&b.recv_bytes_tagged(0, 7).await.unwrap()[..], b"parent");
+        assert_eq!(&sb.recv_bytes_tagged(0, 7).await.unwrap()[..], b"split");
+        // Barriers of both communicators, interleaved, without the sidecar.
+        let (r1, r2, r3, r4) = tokio::join!(sa.barrier(), a.barrier(), b.barrier(), sb.barrier());
+        for r in [r1, r2, r3, r4] {
+            r.unwrap();
+        }
+        drop((sa, sb));
+        shutdown_pair(a, b).await;
     }
 }

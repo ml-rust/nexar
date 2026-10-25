@@ -127,6 +127,38 @@ async fn form_local(
     })
 }
 
+/// Two ranks on loopback, QUIC only, with `depth` messages per receive key.
+#[cfg(test)]
+pub(crate) async fn local_pair(depth: usize) -> (NexarClient, NexarClient) {
+    local_pair_with(NexarConfig {
+        recv_queue_depth: depth,
+        ..NexarConfig::default()
+    })
+    .await
+}
+
+/// Two ranks on loopback with `config`, QUIC only.
+#[cfg(test)]
+pub(crate) async fn local_pair_with(mut config: NexarConfig) -> (NexarClient, NexarClient) {
+    config.enable_tcp_bulk_sidecar = false;
+    let adapter = Arc::new(crate::device::CpuAdapter::new());
+    let mut clients = NexarClient::bootstrap_local_with_config(2, adapter, config)
+        .await
+        .expect("bootstrap two local ranks");
+    clients.sort_by_key(|c| c.rank());
+    let b = clients.pop().expect("rank 1");
+    let a = clients.pop().expect("rank 0");
+    (a, b)
+}
+
+/// Shut down both ranks of a [`local_pair`].
+#[cfg(test)]
+pub(crate) async fn shutdown_pair(a: NexarClient, b: NexarClient) {
+    let (ra, rb) = tokio::join!(a.shutdown(), b.shutdown());
+    ra.expect("rank 0 shutdown");
+    rb.expect("rank 1 shutdown");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

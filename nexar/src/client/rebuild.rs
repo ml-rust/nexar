@@ -5,10 +5,9 @@ use crate::types::Rank;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use super::NexarClient;
-use super::async_client::RawRecvSource;
 use super::hash::fnv1a_comm_id;
 
 impl NexarClient {
@@ -21,8 +20,8 @@ impl NexarClient {
     /// Returns a new `NexarClient` with contiguous ranks `[0, survivors)`,
     /// `world_size = survivors`, and the relative order of surviving ranks preserved.
     ///
-    /// The new client shares the parent's QUIC connections and routers. It uses
-    /// per-comm_id raw channels so its collectives don't interfere with the parent.
+    /// The new client shares the parent's QUIC connections and routers. Its
+    /// own comm_id keeps its receive keys apart from the parent's.
     ///
     /// For sparse topologies, the parent's relay infrastructure is inherited so
     /// non-neighbor communication continues to work via relays.
@@ -70,11 +69,12 @@ impl NexarClient {
         // Build rank_map and peer subset.
         let mut rank_map = HashMap::new();
         let mut new_peers = HashMap::new();
-        let mut comm_receivers = HashMap::new();
+        let mut routers = HashMap::new();
 
         for (new_r, &orig_rank) in survivors.iter().enumerate() {
             let new_r = new_r as Rank;
-            rank_map.insert(new_r, orig_rank);
+            let global = self.resolve_rank(orig_rank);
+            rank_map.insert(new_r, global);
 
             if orig_rank != self.rank {
                 // Only add peers we have direct connections to (in sparse topology,
@@ -82,9 +82,8 @@ impl NexarClient {
                 if let Some(peer) = self.peers.get(&orig_rank) {
                     new_peers.insert(new_r, Arc::clone(peer));
 
-                    if let Some(router) = self.routers.get(&orig_rank) {
-                        let rx = router.register_comm(new_comm_id).await;
-                        comm_receivers.insert(new_r, Mutex::new(rx));
+                    if let Some(router) = self.routers.get(&global) {
+                        routers.insert(global, Arc::clone(router));
                     }
                 }
             }
@@ -95,8 +94,7 @@ impl NexarClient {
             world_size: new_world_size,
             comm_id: new_comm_id,
             peers: new_peers,
-            routers: HashMap::new(),
-            raw_recv: RawRecvSource::Comm(comm_receivers),
+            routers,
             _router_handles: Vec::new(),
             adapter: Arc::clone(&self.adapter),
             _pool: Arc::clone(&self._pool),
@@ -106,7 +104,6 @@ impl NexarClient {
             split_generation: AtomicU64::new(0),
             rank_map,
             collective_tag: AtomicU64::new(1),
-            tagged_receivers: Mutex::new(HashMap::new()),
             config: Arc::clone(&self.config),
             failure_tx: Arc::clone(&self.failure_tx),
             failure_rx: self.failure_rx.clone(),
