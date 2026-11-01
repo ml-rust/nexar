@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-01
+
 ### Breaking
 
 - Wire protocol version 2 (`PROTOCOL_VERSION = 2`). A v1 node cannot join a v2 seed, and the seed rejects it.
@@ -68,6 +70,8 @@
 - Split and rebuilt communicators failed tagged receives and barriers with `UnknownPeer` when the TCP sidecar was off: they had no routers. They now share the parent's routers.
 - A grown communicator in a sparse topology replaced the relay deliveries the parent's relay listeners still fill.
 - The router queued received heartbeats on the control lane, so a barrier that ran after a heartbeat failed with an unexpected message. Received heartbeats are now dropped.
+- `nexar-rdma` builds with libclang 22 and newer. It no longer depends on `ibverbs-sys`. Its build script generates the libibverbs bindings from the system headers with bindgen 0.72. bindgen 0.71, which `ibverbs-sys` 0.3.2 requires, emitted opaque `ibv_mr`, `ibv_qp`, `ibv_cq` and other structs under libclang 22+, so the layout assertions did not compile. The build no longer needs cmake.
+- `nexar-rdma` with the `gpudirect` feature compiles again. The blocking GPUDirect send and receive paths now take the queue-pair lock with `blocking_lock`.
 - `SeedNode::bind` without `NEXAR_CLUSTER_TOKEN` logged its generated token at warn level, so the secret reached every log sink. The seed no longer logs it.
 - `TcpBulkTransport` lost a frame when it arrived while a receiver for its tag registered, and two concurrent receivers for one tag could orphan one of them.
 - Sparse topologies with the TCP bulk sidecar enabled failed to bootstrap.

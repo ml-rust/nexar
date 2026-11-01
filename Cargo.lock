@@ -64,15 +64,14 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bindgen"
-version = "0.71.1"
+version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f58bf3d7db68cfbac37cfc485a8d711e87e064c3d0fe0435b92f7a407f9d6b3"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
  "itertools",
- "log",
  "prettyplease",
  "proc-macro2",
  "quote",
@@ -172,15 +171,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cmake"
-version = "0.1.57"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -223,9 +213,9 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "cudarc"
-version = "0.19.2"
+version = "0.19.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aed81f178e780f3d5d354d12b4c5c5a484c4a9c329ecd037ac57f2a0e0648397"
+checksum = "7359bf1de037ddada72729c3acec9b040f3468400c6e9e740b01ba0cd2e89562"
 dependencies = [
  "libloading 0.9.0",
 ]
@@ -448,16 +438,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
-name = "ibverbs-sys"
-version = "0.3.2+55.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8149ab8d940ea7e7073a24ba6e3ec6b0cc8ceab6ea3d562d60a21ca5cc23413a"
-dependencies = [
- "bindgen",
- "cmake",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -624,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "nexar"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -642,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "nexar-nccl"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cudarc",
  "gethostname",
@@ -655,14 +635,15 @@ dependencies = [
 
 [[package]]
 name = "nexar-rdma"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
+ "bindgen",
  "crossbeam-queue",
  "cudarc",
  "futures",
- "ibverbs-sys",
  "libc",
  "nexar",
+ "pkg-config",
  "tokio",
  "tracing",
 ]
@@ -779,6 +760,12 @@ name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "powerfmt"
