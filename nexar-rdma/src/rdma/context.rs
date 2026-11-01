@@ -2,7 +2,7 @@
 
 use super::connection::{PreparedRdmaConnection, RdmaEndpoint};
 use super::mr::{CompChannelFd, RdmaMr};
-use ibverbs_sys::ibv_access_flags;
+use crate::ibverbs_sys::{self, ibv_access_flags};
 use nexar::error::{NexarError, Result};
 use nexar::types::Rank;
 use std::os::raw::c_int;

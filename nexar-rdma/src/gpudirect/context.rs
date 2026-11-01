@@ -1,5 +1,6 @@
 //! GPUDirect RDMA context: raw FFI device, PD management.
 
+use crate::ibverbs_sys;
 use nexar::error::{NexarError, Result};
 use std::os::raw::c_int;
 

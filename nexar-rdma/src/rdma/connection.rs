@@ -1,6 +1,6 @@
 //! RDMA queue pair management for reliable connected (RC) transport.
 //!
-//! Uses raw `ibverbs-sys` FFI (no safe wrapper).
+//! Uses the raw libibverbs FFI in `crate::ibverbs_sys` (no safe wrapper).
 //!
 //! Two-phase construction:
 //! 1. `RdmaContext::new()` — opens device, allocates PD and CQs.
@@ -10,7 +10,7 @@
 
 use super::context::RdmaContext;
 use super::mr::{RdmaMr, SendCq, wait_for_completion};
-use ibverbs_sys::{ibv_qp_attr_mask, ibv_qp_state, ibv_send_flags, ibv_wr_opcode};
+use crate::ibverbs_sys::{self, ibv_qp_attr_mask, ibv_qp_state, ibv_send_flags, ibv_wr_opcode};
 use nexar::error::{NexarError, Result};
 use std::os::raw::c_int;
 use std::ptr;

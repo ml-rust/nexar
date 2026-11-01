@@ -47,7 +47,7 @@ impl ClusterCa {
 
     /// Issue a leaf certificate signed by this CA with a single SAN.
     ///
-    /// Equivalent to [`issue_cert_multi`] with `&[san]`; kept as a
+    /// Equivalent to [`issue_cert_multi`](Self::issue_cert_multi) with `&[san]`; kept as a
     /// convenience for single-SAN callers.
     pub fn issue_cert(
         &self,
@@ -113,7 +113,7 @@ impl ClusterCa {
 
     /// PKCS#8 DER-encoded private key of this CA. Exposes the key so
     /// the caller can persist it (e.g. on disk at 0600) and later
-    /// reconstruct the `ClusterCa` via [`from_der`] to issue further
+    /// reconstruct the `ClusterCa` via [`from_der`](Self::from_der) to issue further
     /// leaf certificates under the same CA — used by operator tooling
     /// that rotates node certs without rotating the CA itself.
     ///
@@ -125,7 +125,7 @@ impl ClusterCa {
 
     /// Reconstruct a `ClusterCa` from a previously-saved
     /// `(key_pair_pkcs8_der, cert_der)` pair. Inverse of
-    /// [`key_pair_pkcs8_der`] + [`cert_der`].
+    /// [`key_pair_pkcs8_der`](Self::key_pair_pkcs8_der) + [`cert_der`](Self::cert_der).
     ///
     /// Requires the `x509-parser` feature on rcgen (enabled by this
     /// crate's default build).

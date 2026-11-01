@@ -34,6 +34,7 @@ pub mod cuda_adapter;
 pub mod ext;
 #[cfg(feature = "gpudirect")]
 pub mod gpudirect;
+mod ibverbs_sys;
 pub mod rdma;
 
 #[cfg(feature = "gpudirect")]

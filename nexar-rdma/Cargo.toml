@@ -12,7 +12,6 @@ categories = ["network-programming"]
 
 [dependencies]
 nexar.workspace = true
-ibverbs-sys = "0.3"
 libc = "0.2"
 crossbeam-queue.workspace = true
 futures = "0.3"
@@ -21,6 +20,12 @@ tracing.workspace = true
 
 # Optional: GPUDirect RDMA (GPU memory → NIC directly)
 cudarc = { workspace = true, optional = true }
+
+# libibverbs bindings from the system rdma-core headers (see build.rs).
+# bindgen 0.71 emits opaque structs under libclang 22+. 0.72.1 does not.
+[build-dependencies]
+bindgen = { version = "0.72.1", default-features = false, features = ["runtime", "prettyplease"] }
+pkg-config = "0.3.32"
 
 [features]
 default = []

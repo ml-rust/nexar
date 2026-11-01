@@ -1,5 +1,6 @@
 //! RDMA registered memory region.
 
+use crate::ibverbs_sys;
 use nexar::error::{NexarError, Result};
 
 /// A registered RDMA memory region for send/recv.

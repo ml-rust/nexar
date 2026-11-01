@@ -45,6 +45,14 @@ client.shutdown().await?;
 
 ## Building
 
+The build generates the libibverbs bindings from the system headers. It needs:
+
+- libibverbs headers: `libibverbs-dev` (Debian, Ubuntu) or `rdma-core` (Arch, Fedora).
+- libclang, for bindgen.
+- pkg-config, optional. Without it the build links `-libverbs` from the default search path.
+
+Set `NEXAR_RDMA_INCLUDE_DIR` when `infiniband/verbs.h` is outside the default include path.
+
 ```bash
 # RDMA (requires libibverbs / rdma-core)
 cargo build -p nexar-rdma --release

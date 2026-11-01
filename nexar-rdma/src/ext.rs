@@ -143,47 +143,45 @@ mod gpudirect_ext {
 
         async fn send_raw_gpu(&self, gpu_ptr: u64, size: usize) -> Result<()> {
             // Extract Arc and drop extension guard before any .await.
-            if let Some(gd) = get_gpudirect(self)? {
-                if let Some(pooled) = gd.pool.checkout() {
-                    let mr_size = pooled.mr().size();
-                    let mr_gpu_ptr = pooled.mr().gpu_ptr();
-                    if mr_size >= size {
-                        // Single chunk: D2D copy into MR, send.
-                        if mr_gpu_ptr != gpu_ptr {
-                            unsafe {
-                                cudarc::driver::result::memcpy_dtod_sync(mr_gpu_ptr, gpu_ptr, size)
-                                    .map_err(|e| {
-                                        NexarError::device(format!(
-                                            "GPUDirect D2D copy failed: {e}"
-                                        ))
-                                    })?;
-                            }
-                        }
-                        return send_via_gpudirect(Arc::clone(&gd), pooled).await;
-                    }
-                    // Pipelined chunking: data exceeds MR size, send in MR-sized pieces
-                    // via GPUDirect instead of bouncing the entire payload through the CPU.
-                    let mut offset = 0usize;
-                    while offset < size {
-                        let chunk = std::cmp::min(mr_size, size - offset);
+            if let Some(gd) = get_gpudirect(self)?
+                && let Some(pooled) = gd.pool.checkout()
+            {
+                let mr_size = pooled.mr().size();
+                let mr_gpu_ptr = pooled.mr().gpu_ptr();
+                if mr_size >= size {
+                    // Single chunk: D2D copy into MR, send.
+                    if mr_gpu_ptr != gpu_ptr {
                         unsafe {
-                            cudarc::driver::result::memcpy_dtod_sync(
-                                mr_gpu_ptr,
-                                gpu_ptr + offset as u64,
-                                chunk,
-                            )
-                            .map_err(|e| {
-                                NexarError::device(format!(
-                                    "GPUDirect D2D copy (chunk at offset {offset}) failed: {e}"
-                                ))
-                            })?;
+                            cudarc::driver::result::memcpy_dtod_sync(mr_gpu_ptr, gpu_ptr, size)
+                                .map_err(|e| {
+                                    NexarError::device(format!("GPUDirect D2D copy failed: {e}"))
+                                })?;
                         }
-                        // Re-checkout isn't needed — we reuse the same pooled MR for each chunk.
-                        send_via_gpudirect_sized(Arc::clone(&gd), &pooled, chunk).await?;
-                        offset += chunk;
                     }
-                    return Ok(());
+                    return send_via_gpudirect(Arc::clone(&gd), pooled).await;
                 }
+                // Pipelined chunking: data exceeds MR size, send in MR-sized pieces
+                // via GPUDirect instead of bouncing the entire payload through the CPU.
+                let mut offset = 0usize;
+                while offset < size {
+                    let chunk = std::cmp::min(mr_size, size - offset);
+                    unsafe {
+                        cudarc::driver::result::memcpy_dtod_sync(
+                            mr_gpu_ptr,
+                            gpu_ptr + offset as u64,
+                            chunk,
+                        )
+                        .map_err(|e| {
+                            NexarError::device(format!(
+                                "GPUDirect D2D copy (chunk at offset {offset}) failed: {e}"
+                            ))
+                        })?;
+                    }
+                    // Re-checkout isn't needed — we reuse the same pooled MR for each chunk.
+                    send_via_gpudirect_sized(Arc::clone(&gd), &pooled, chunk).await?;
+                    offset += chunk;
+                }
+                return Ok(());
             }
 
             // Tier 2: Stage GPU→host, then use RDMA or QUIC.
@@ -192,47 +190,45 @@ mod gpudirect_ext {
         }
 
         async fn recv_raw_gpu(&self, gpu_ptr: u64, size: usize) -> Result<()> {
-            if let Some(gd) = get_gpudirect(self)? {
-                if let Some(pooled) = gd.pool.checkout() {
-                    let mr_size = pooled.mr().size();
-                    let mr_gpu_ptr = pooled.mr().gpu_ptr();
-                    if mr_size >= size {
-                        // Single chunk: receive into MR, D2D copy to destination.
-                        recv_via_gpudirect(Arc::clone(&gd), pooled).await?;
+            if let Some(gd) = get_gpudirect(self)?
+                && let Some(pooled) = gd.pool.checkout()
+            {
+                let mr_size = pooled.mr().size();
+                let mr_gpu_ptr = pooled.mr().gpu_ptr();
+                if mr_size >= size {
+                    // Single chunk: receive into MR, D2D copy to destination.
+                    recv_via_gpudirect(Arc::clone(&gd), pooled).await?;
 
-                        if mr_gpu_ptr != gpu_ptr {
-                            unsafe {
-                                cudarc::driver::result::memcpy_dtod_sync(gpu_ptr, mr_gpu_ptr, size)
-                                    .map_err(|e| {
-                                        NexarError::device(format!(
-                                            "GPUDirect D2D copy failed: {e}"
-                                        ))
-                                    })?;
-                            }
-                        }
-                        return Ok(());
-                    }
-                    // Pipelined chunking: receive in MR-sized pieces.
-                    let mut offset = 0usize;
-                    while offset < size {
-                        let chunk = std::cmp::min(mr_size, size - offset);
-                        recv_via_gpudirect_sized(Arc::clone(&gd), &pooled, chunk).await?;
+                    if mr_gpu_ptr != gpu_ptr {
                         unsafe {
-                            cudarc::driver::result::memcpy_dtod_sync(
-                                gpu_ptr + offset as u64,
-                                mr_gpu_ptr,
-                                chunk,
-                            )
-                            .map_err(|e| {
-                                NexarError::device(format!(
-                                    "GPUDirect D2D copy (chunk at offset {offset}) failed: {e}"
-                                ))
-                            })?;
+                            cudarc::driver::result::memcpy_dtod_sync(gpu_ptr, mr_gpu_ptr, size)
+                                .map_err(|e| {
+                                    NexarError::device(format!("GPUDirect D2D copy failed: {e}"))
+                                })?;
                         }
-                        offset += chunk;
                     }
                     return Ok(());
                 }
+                // Pipelined chunking: receive in MR-sized pieces.
+                let mut offset = 0usize;
+                while offset < size {
+                    let chunk = std::cmp::min(mr_size, size - offset);
+                    recv_via_gpudirect_sized(Arc::clone(&gd), &pooled, chunk).await?;
+                    unsafe {
+                        cudarc::driver::result::memcpy_dtod_sync(
+                            gpu_ptr + offset as u64,
+                            mr_gpu_ptr,
+                            chunk,
+                        )
+                        .map_err(|e| {
+                            NexarError::device(format!(
+                                "GPUDirect D2D copy (chunk at offset {offset}) failed: {e}"
+                            ))
+                        })?;
+                    }
+                    offset += chunk;
+                }
+                return Ok(());
             }
 
             Err(NexarError::device(
@@ -243,15 +239,9 @@ mod gpudirect_ext {
     }
 
     async fn send_via_gpudirect(gd: Arc<GpuDirectState>, pooled: PooledGpuMr) -> Result<()> {
-        tokio::task::spawn_blocking(move || {
-            let qp = gd
-                .qp
-                .lock()
-                .map_err(|e| NexarError::device(format!("GPUDirect lock poisoned: {e}")))?;
-            qp.send(pooled.mr(), 0)
-        })
-        .await
-        .map_err(|e| NexarError::device(format!("GPUDirect spawn_blocking: {e}")))?
+        tokio::task::spawn_blocking(move || gd.qp.blocking_lock().send(pooled.mr(), 0))
+            .await
+            .map_err(|e| NexarError::device(format!("GPUDirect spawn_blocking: {e}")))?
     }
 
     /// Send a chunk of size `chunk_size` from a pooled MR (which may be larger).
@@ -271,11 +261,7 @@ mod gpudirect_ext {
             // and we only read the pointer to reconstruct a reference inside
             // the blocking task. The MR is valid because the caller holds it.
             let mr = unsafe { &*(mr_ptr as *const crate::gpudirect::GpuMr) };
-            let qp = gd
-                .qp
-                .lock()
-                .map_err(|e| NexarError::device(format!("GPUDirect lock poisoned: {e}")))?;
-            qp.send(mr, 0)
+            gd.qp.blocking_lock().send(mr, 0)
         })
         .await
         .map_err(|e| NexarError::device(format!("GPUDirect spawn_blocking: {e}")))?
@@ -290,26 +276,16 @@ mod gpudirect_ext {
         let mr_ptr = pooled.mr() as *const _ as usize;
         tokio::task::spawn_blocking(move || {
             let mr = unsafe { &*(mr_ptr as *const crate::gpudirect::GpuMr) };
-            let qp = gd
-                .qp
-                .lock()
-                .map_err(|e| NexarError::device(format!("GPUDirect lock poisoned: {e}")))?;
-            qp.recv(mr, 0)
+            gd.qp.blocking_lock().recv(mr, 0)
         })
         .await
         .map_err(|e| NexarError::device(format!("GPUDirect spawn_blocking: {e}")))?
     }
 
     async fn recv_via_gpudirect(gd: Arc<GpuDirectState>, pooled: PooledGpuMr) -> Result<()> {
-        tokio::task::spawn_blocking(move || {
-            let qp = gd
-                .qp
-                .lock()
-                .map_err(|e| NexarError::device(format!("GPUDirect lock poisoned: {e}")))?;
-            qp.recv(pooled.mr(), 0)
-        })
-        .await
-        .map_err(|e| NexarError::device(format!("GPUDirect spawn_blocking: {e}")))?
+        tokio::task::spawn_blocking(move || gd.qp.blocking_lock().recv(pooled.mr(), 0))
+            .await
+            .map_err(|e| NexarError::device(format!("GPUDirect spawn_blocking: {e}")))?
     }
 }
 

@@ -1,7 +1,8 @@
 //! GPUDirect queue pair: creation, handshake, send/recv operations.
 
-use ibverbs_sys::{
-    ibv_access_flags, ibv_qp_attr_mask, ibv_qp_state, ibv_qp_type, ibv_send_flags, ibv_wr_opcode,
+use crate::ibverbs_sys::{
+    self, ibv_access_flags, ibv_qp_attr_mask, ibv_qp_state, ibv_qp_type, ibv_send_flags,
+    ibv_wr_opcode,
 };
 use nexar::error::{NexarError, Result};
 use std::os::raw::c_int;

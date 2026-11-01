@@ -1,5 +1,6 @@
 //! GPU memory region and pooling for GPUDirect RDMA.
 
+use crate::ibverbs_sys;
 use crossbeam_queue::ArrayQueue;
 use nexar::error::Result;
 use std::sync::Arc;
