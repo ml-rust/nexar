@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-06
+
+### Changed
+
+- `README`, crate description: state what the crate does.
+
 ## [0.2.0] - 2026-11-01
 
 Selective ordered receives, one-process-per-rank bootstrap, a clean shutdown, and bounds on every peer-announced length.
