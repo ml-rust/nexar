@@ -50,6 +50,17 @@ Replaces MPI for inter-node communication. Point-to-point messages, collectives,
 
 nexar handles the network layer for distributed Rust programs. It provides point-to-point transfers, collectives, elastic membership, and fault recovery. Workers find each other through a seed node and form a direct peer-to-peer mesh.
 
+- **Language:** the core `nexar` crate is Rust. It builds on `quinn` (QUIC), `rustls`, `rkyv`, and `tokio`. Only `ring`, a dependency of `rustls`, builds bundled C and assembly. There is no Python API.
+- **Data types:** `F32`, `F64`, `F16`, `BF16`, `I8`, `I32`, `I64`, `U8`, `U32`, `U64`. Reductions: `Sum`, `Prod`, `Min`, `Max`.
+- **Hardware:** the core crate moves host memory with `CpuAdapter`. `nexar-rdma` adds InfiniBand and RoCE through `libibverbs`, and GPU memory through GPUDirect. `nexar-nccl` uses NCCL inside a node and nexar between nodes.
+- **Used by:** `boostr` for distributed inference, behind its `distributed` feature.
+
+### Not supported yet
+
+- Python bindings.
+- GPU adapters other than `CudaAdapter` (NVIDIA, in `nexar-rdma`). The repository has no ROCm or Intel adapter.
+- GPU collectives without NCCL. `nexar-nccl` requires NCCL and CUDA.
+
 ## Quick Start
 
 Add the crates to your project:
